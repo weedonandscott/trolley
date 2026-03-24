@@ -46,6 +46,14 @@ func actionCallback(
     case GHOSTTY_ACTION_SET_TITLE:
         let title = String(cString: action.action.set_title.title)
         gWindow?.title = title
+        // Update app menu title to match the window title
+        if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
+            appMenu.title = title
+            // Update the About item too
+            if let aboutItem = appMenu.items.first {
+                aboutItem.title = "About \(title)"
+            }
+        }
         return true
 
     case GHOSTTY_ACTION_QUIT:
@@ -490,7 +498,74 @@ class TrolleyView: NSView, NSTextInputClient {
 // AppDelegate
 // ---------------------------------------------------------------------------
 class AppDelegate: NSObject, NSApplicationDelegate {
+
+    // MARK: - Menu bar
+
+    private func buildMenuBar() {
+        let mainMenu = NSMenu()
+
+        // ---- App menu ----
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+
+        appMenu.addItem(withTitle: "About Trolley", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        // ---- Edit menu ----
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+
+        // Copy/Paste/Select All: use nil target + key equivalents so ghostty keybinds handle them
+        let copyItem = NSMenuItem(title: "Copy", action: nil, keyEquivalent: "c")
+        copyItem.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(copyItem)
+
+        let pasteItem = NSMenuItem(title: "Paste", action: nil, keyEquivalent: "v")
+        pasteItem.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(pasteItem)
+
+        let selectAllItem = NSMenuItem(title: "Select All", action: nil, keyEquivalent: "a")
+        selectAllItem.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(selectAllItem)
+
+        // ---- View menu ----
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: "View")
+        viewMenuItem.submenu = viewMenu
+
+        let fontUpItem = NSMenuItem(title: "Increase Font Size", action: nil, keyEquivalent: "=")
+        fontUpItem.keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(fontUpItem)
+
+        let fontDownItem = NSMenuItem(title: "Decrease Font Size", action: nil, keyEquivalent: "-")
+        fontDownItem.keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(fontDownItem)
+
+        // ---- Window menu ----
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // -- Build standard menu bar --
+        buildMenuBar()
+
         // -- Set CWD to exe dir so relative paths (e.g. command = direct:./<slug>_core) resolve --
         FileManager.default.changeCurrentDirectoryPath(getExeDir())
 
