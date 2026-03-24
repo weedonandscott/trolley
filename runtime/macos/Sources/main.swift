@@ -10,7 +10,8 @@ var gSurface: ghostty_surface_t?
 var gApp: ghostty_app_t?
 var gWindowConfig = TrolleyGuiConfig(
     initial_width: 0, initial_height: 0, resizable: -1,
-    min_width: 0, min_height: 0, max_width: 0, max_height: 0
+    min_width: 0, min_height: 0, max_width: 0, max_height: 0,
+    macos_titlebar_style: 0
 )
 
 // ---------------------------------------------------------------------------
@@ -221,6 +222,7 @@ class TrolleyView: NSView, NSTextInputClient {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
@@ -438,6 +440,50 @@ class TrolleyView: NSView, NSTextInputClient {
         mods |= Int32(momentum) << 1
         ghostty_surface_mouse_scroll(surface, x, y, mods)
     }
+
+    // MARK: - Drag and drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            return .copy
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let surface = gSurface else { return false }
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else { return false }
+
+        let paths = urls.map { shellEscape($0.path) }
+        let text = paths.joined(separator: " ")
+
+        // Send each character as a key press to the terminal
+        for char in text {
+            let str = String(char)
+            str.withCString { ptr in
+                var key_ev = ghostty_input_key_s()
+                key_ev.action = GHOSTTY_ACTION_PRESS
+                key_ev.keycode = 0
+                key_ev.mods = ghostty_input_mods_e(GHOSTTY_MODS_NONE.rawValue)
+                key_ev.consumed_mods = ghostty_input_mods_e(GHOSTTY_MODS_NONE.rawValue)
+                key_ev.composing = false
+                key_ev.text = ptr
+                key_ev.unshifted_codepoint = char.unicodeScalars.first?.value ?? 0
+                _ = ghostty_surface_key(surface, key_ev)
+            }
+        }
+        return true
+    }
+
+    private func shellEscape(_ path: String) -> String {
+        if path.rangeOfCharacter(from: .init(charactersIn: " \t'\"\\!$`#&|;(){}[]<>?*~")) != nil {
+            return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        return path
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +544,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             fputs("trolley: ghostty_app_new failed\n", stderr)
             exit(1)
         }
+        // Read background and foreground colors before freeing config
+        var bgColor: NSColor = .black
+        var fgColor: NSColor = .white
+        var bg = ghostty_config_color_s(r: 0, g: 0, b: 0)
+        if ghostty_config_get(config, &bg, "background", 10) {
+            bgColor = NSColor(
+                red: CGFloat(bg.r) / 255.0,
+                green: CGFloat(bg.g) / 255.0,
+                blue: CGFloat(bg.b) / 255.0,
+                alpha: 1.0
+            )
+        }
+        var fg = ghostty_config_color_s(r: 255, g: 255, b: 255)
+        if ghostty_config_get(config, &fg, "foreground", 10) {
+            fgColor = NSColor(
+                red: CGFloat(fg.r) / 255.0,
+                green: CGFloat(fg.g) / 255.0,
+                blue: CGFloat(fg.b) / 255.0,
+                alpha: 1.0
+            )
+        }
+
         ghostty_config_free(config)
         gApp = app
 
@@ -517,6 +585,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "trolley"
+
+        // Apply macOS titlebar style: 0 = visible (default), 1 = hidden, 2 = transparent
+        if gWindowConfig.macos_titlebar_style == 1 || gWindowConfig.macos_titlebar_style == 2 {
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = bgColor
+            if gWindowConfig.macos_titlebar_style == 1 {
+                window.titleVisibility = .hidden
+            }
+        }
 
         // Min/max size limits (each dimension independent)
         if gWindowConfig.min_width > 0 || gWindowConfig.min_height > 0 {
@@ -560,6 +637,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ghostty_surface_set_size(surface, UInt32(backed.width), UInt32(backed.height))
         ghostty_surface_set_content_scale(surface, Double(window.backingScaleFactor), Double(window.backingScaleFactor))
         ghostty_surface_set_focus(surface, true)
+
+        // Match window appearance to terminal background brightness
+        if gWindowConfig.macos_titlebar_style == 1 || gWindowConfig.macos_titlebar_style == 2 {
+            let brightness = bg.r > 128 || bg.g > 128 || bg.b > 128
+            window.appearance = NSAppearance(named: brightness ? .aqua : .darkAqua)
+        }
 
         // -- Show window --
         window.makeKeyAndOrderFront(nil)

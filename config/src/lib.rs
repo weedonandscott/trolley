@@ -336,6 +336,22 @@ pub struct Gui {
     pub max_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_height: Option<u32>,
+    /// macOS titlebar style. Defaults to "visible".
+    /// Supported values: "visible", "hidden", "transparent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macos_titlebar_style: Option<MacosTitlebarStyle>,
+}
+
+/// Controls the macOS titlebar appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MacosTitlebarStyle {
+    /// Normal titled window (default).
+    Visible,
+    /// Titlebar is transparent with hidden title text; traffic lights remain.
+    Hidden,
+    /// Titlebar background is transparent; title text still shown.
+    Transparent,
 }
 
 impl Gui {
@@ -347,6 +363,7 @@ impl Gui {
             && self.min_height.is_none()
             && self.max_width.is_none()
             && self.max_height.is_none()
+            && self.macos_titlebar_style.is_none()
     }
 }
 
@@ -773,6 +790,8 @@ pub struct TrolleyGuiConfig {
     pub max_width: u32,
     /// Maximum height in pixels. 0 = unset.
     pub max_height: u32,
+    /// macOS titlebar style. 0 = visible (default), 1 = hidden, 2 = transparent.
+    pub macos_titlebar_style: u8,
 }
 
 /// Load a trolley manifest and extract the window and environment configs.
@@ -808,6 +827,11 @@ pub unsafe extern "C" fn trolley_load_manifest(
         window_config.min_height = manifest.gui.min_height.unwrap_or(0);
         window_config.max_width = manifest.gui.max_width.unwrap_or(0);
         window_config.max_height = manifest.gui.max_height.unwrap_or(0);
+        window_config.macos_titlebar_style = match manifest.gui.macos_titlebar_style {
+            None | Some(MacosTitlebarStyle::Visible) => 0,
+            Some(MacosTitlebarStyle::Hidden) => 1,
+            Some(MacosTitlebarStyle::Transparent) => 2,
+        };
 
         // Report ghostty config length so the caller can allocate.
         let config_string = ghostty_config_string(&manifest);
