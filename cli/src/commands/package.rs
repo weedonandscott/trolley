@@ -99,7 +99,7 @@ pub fn run(
             .resources
             .extend(common::copy_data_path_to_bundle(data_path, &bundle_dir)?);
     }
-    if let Some(icon_path) = &windows_icon {
+    if target.is_windows() && let Some(icon_path) = &windows_icon {
         common::copy_windows_icon_to_bundle(icon_path, &bundle_dir)?;
         manifest
             .resources
@@ -121,7 +121,7 @@ pub fn run(
         .with_context(|| format!("copying runtime to {}", bundle_dir.display()))?;
     fs::copy(&tui_binary, bundle_dir.join(&manifest.core_name))
         .with_context(|| format!("copying TUI binary to {}", bundle_dir.display()))?;
-    let stamped_runtime_icon = if let Some(icon_path) = &windows_icon {
+    let stamped_runtime_icon = if target.is_windows() && let Some(icon_path) = &windows_icon {
         super::windows_exe_icon::stamp_exe_icon(&bundled_runtime, icon_path).with_context(|| {
             format!(
                 "stamping Windows app icon into {}",
@@ -194,11 +194,11 @@ pub fn run(
     for data_path in &data_paths {
         println!("  {}  (embedded data)", data_path.relative_path.display());
     }
-    if windows_icon.is_some() {
+    if target.is_windows() && windows_icon.is_some() {
         println!("  {}  (Windows app icon)", common::WINDOWS_ICON_FILENAME);
         if stamped_runtime_icon {
             println!("  {}  (Windows exe icon stamped)", manifest.runtime_name);
-        } else if target.is_windows() {
+        } else {
             eprintln!(
                 "Warning: Windows exe icon stamping is only available when packaging on Windows."
             );
