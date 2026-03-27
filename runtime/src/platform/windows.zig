@@ -36,7 +36,17 @@ const WM_MBUTTONUP = 0x0208;
 const WM_MOUSEHWHEEL = 0x020E;
 const WM_GETMINMAXINFO = 0x0024;
 const WM_ERASEBKGND = 0x0014;
+const WM_SETICON = 0x0080;
 const QS_ALLINPUT = 0x04FF;
+const ICON_SMALL: usize = 0;
+const ICON_BIG: usize = 1;
+const IMAGE_ICON: u32 = 1;
+const LR_LOADFROMFILE: u32 = 0x00000010;
+const SM_CXICON = 11;
+const SM_CYICON = 12;
+const SM_CXSMICON = 49;
+const SM_CYSMICON = 50;
+const BUNDLED_WINDOW_ICON_FILENAME = "app.ico";
 
 const MINMAXINFO = extern struct {
     ptReserved: foundation.POINT,
@@ -61,9 +71,20 @@ extern "user32" fn PostMessageW(
     lParam: LPARAM,
 ) callconv(.winapi) BOOL;
 
+extern "user32" fn SendMessageW(
+    hWnd: ?HWND,
+    Msg: u32,
+    wParam: WPARAM,
+    lParam: LPARAM,
+) callconv(.winapi) LRESULT;
+
 extern "user32" fn GetDpiForWindow(
     hwnd: HWND,
 ) callconv(.winapi) u32;
+
+extern "user32" fn GetSystemMetrics(
+    nIndex: i32,
+) callconv(.winapi) i32;
 
 extern "user32" fn AdjustWindowRectEx(
     lpRect: *foundation.RECT,
@@ -91,6 +112,15 @@ extern "user32" fn SetProcessDpiAwarenessContext(
 
 extern "kernel32" fn GetModuleHandleW(
     lpModuleName: ?[*:0]const u16,
+) callconv(.winapi) ?*anyopaque;
+
+extern "user32" fn LoadImageW(
+    hInst: ?*anyopaque,
+    name: [*:0]const u16,
+    @"type": u32,
+    cx: i32,
+    cy: i32,
+    fuLoad: u32,
 ) callconv(.winapi) ?*anyopaque;
 
 extern "kernel32" fn ExitProcess(
@@ -196,6 +226,8 @@ var g_hglrc: ?HGLRC = null;
 var g_surface: ghostty.ghostty_surface_t = null;
 var g_app: ghostty.ghostty_app_t = null;
 var g_opengl32: ?*anyopaque = null;
+var g_window_icon_big: ?wam.HICON = null;
+var g_window_icon_small: ?wam.HICON = null;
 
 // Window config from trolley manifest
 var g_window_config: trolley.TrolleyGuiConfig = .{
@@ -208,6 +240,28 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .max_height = 0,
     .win_precise_timer = 1,
 };
+
+fn loadBundledWindowIcon(width: i32, height: i32) ?wam.HICON {
+    const path = common.getBundledPath(BUNDLED_WINDOW_ICON_FILENAME) orelse return null;
+    defer std.heap.page_allocator.free(path);
+
+    const wide_path = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return null;
+    defer std.heap.page_allocator.free(wide_path);
+
+    const handle = LoadImageW(null, wide_path, IMAGE_ICON, width, height, LR_LOADFROMFILE) orelse return null;
+    return @ptrCast(handle);
+}
+
+fn applyWindowIcons(hwnd: HWND) void {
+    if (g_window_icon_big) |icon| {
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_BIG, @as(LPARAM, @intCast(@intFromPtr(icon))));
+    }
+    if (g_window_icon_small) |icon| {
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @intCast(@intFromPtr(icon))));
+    } else if (g_window_icon_big) |icon| {
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @intCast(@intFromPtr(icon))));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WGL ↔ ghostty OpenGL context bridge
@@ -879,6 +933,8 @@ pub fn main() !void {
 
     const initial_width: i32 = if (g_window_config.initial_width > 0) @intCast(g_window_config.initial_width) else 800;
     const initial_height: i32 = if (g_window_config.initial_height > 0) @intCast(g_window_config.initial_height) else 600;
+    g_window_icon_big = loadBundledWindowIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    g_window_icon_small = loadBundledWindowIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
 
     // -- Register window class --
     const hinstance: ?*anyopaque = GetModuleHandleW(null);
@@ -890,7 +946,7 @@ pub fn main() !void {
         .cbClsExtra = 0,
         .cbWndExtra = 0,
         .hInstance = @ptrCast(hinstance),
-        .hIcon = null,
+        .hIcon = g_window_icon_big,
         .hCursor = wam.LoadCursorW(null, wam.IDC_ARROW),
         .hbrBackground = null,
         .lpszMenuName = null,
@@ -935,6 +991,7 @@ pub fn main() !void {
     ) orelse return error.CreateWindowFailed;
 
     g_hwnd = hwnd;
+    applyWindowIcons(hwnd);
 
     // -- Create modern OpenGL context --
     const gl_ctx = try createModernGLContext(hwnd);

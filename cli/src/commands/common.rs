@@ -10,6 +10,7 @@ pub const CONFIG_FILENAME: &str = "trolley.toml";
 pub const GHOSTTY_CONFIG_FILENAME: &str = "ghostty.conf";
 pub const ENVIRONMENT_FILENAME: &str = "environment";
 pub const FONTS_CONFIG_FILENAME: &str = "fonts.conf";
+pub const WINDOWS_ICON_FILENAME: &str = "app.ico";
 
 // ---------------------------------------------------------------------------
 // ProjectContext — resolved config, paths, ready for commands
@@ -335,6 +336,56 @@ pub fn copy_fonts_to_bundle(font_files: &[PathBuf], output_dir: &Path) -> Result
     std::fs::write(&fonts_conf, FONTCONFIG_TEMPLATE)
         .with_context(|| format!("writing {}", fonts_conf.display()))?;
 
+    Ok(())
+}
+
+/// Resolve the first Windows `.ico` declared by `[app].icons`.
+///
+/// The chosen icon is bundled under a fixed filename so the Windows runtime can
+/// load it without depending on source-tree-relative manifest paths.
+pub fn resolve_windows_icon(project_dir: &Path, config: &Config) -> Result<Option<PathBuf>> {
+    for pattern in &config.app.icons {
+        let pattern_path = project_dir.join(pattern);
+        let pattern = pattern_path.to_string_lossy().into_owned();
+        let mut matches = Vec::new();
+
+        for entry in
+            glob::glob(&pattern).with_context(|| format!("invalid icon glob: {pattern}"))?
+        {
+            let path = entry.with_context(|| format!("reading icon glob: {pattern}"))?;
+            let is_ico = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("ico"))
+                .unwrap_or(false);
+            if !is_ico {
+                continue;
+            }
+
+            matches.push(
+                path.canonicalize()
+                    .with_context(|| format!("resolving icon {}", path.display()))?,
+            );
+        }
+
+        matches.sort();
+        if let Some(path) = matches.into_iter().next() {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn copy_windows_icon_to_bundle(icon_path: &Path, output_dir: &Path) -> Result<()> {
+    let dest = output_dir.join(WINDOWS_ICON_FILENAME);
+    std::fs::copy(icon_path, &dest).with_context(|| {
+        format!(
+            "copying Windows icon {} to {}",
+            icon_path.display(),
+            dest.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -839,6 +890,44 @@ mod tests {
         manifest.environment.env_file = Some("nonexistent.env".into());
         let result = assemble_environment(dir.path(), &manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_windows_icon_prefers_ico_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets_dir = dir.path().join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(assets_dir.join("icon.png"), b"png").unwrap();
+        std::fs::write(assets_dir.join("icon.ico"), b"ico").unwrap();
+
+        let mut manifest = test_manifest();
+        manifest.app.icons = vec!["assets/icon.*".into()];
+
+        let resolved = resolve_windows_icon(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            resolved,
+            Some(assets_dir.join("icon.ico").canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_windows_icon_uses_first_pattern_with_ico() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets_dir = dir.path().join("assets");
+        let icons_dir = dir.path().join("icons");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::create_dir_all(&icons_dir).unwrap();
+        std::fs::write(assets_dir.join("icon.png"), b"png").unwrap();
+        std::fs::write(icons_dir.join("app.ico"), b"ico").unwrap();
+
+        let mut manifest = test_manifest();
+        manifest.app.icons = vec!["assets/*".into(), "icons/*".into()];
+
+        let resolved = resolve_windows_icon(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            resolved,
+            Some(icons_dir.join("app.ico").canonicalize().unwrap())
+        );
     }
 
     #[test]

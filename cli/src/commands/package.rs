@@ -84,6 +84,11 @@ pub fn run(
     let font_family_names = common::read_font_family_names(&font_files)?;
     let shaders = common::resolve_shaders(&ctx.project_dir, &ctx.config)?;
     let data_paths = common::resolve_data_paths(&ctx.project_dir, &ctx.config)?;
+    let windows_icon = if target.is_windows() {
+        common::resolve_windows_icon(&ctx.project_dir, &ctx.config)?
+    } else {
+        None
+    };
 
     for shader in &shaders {
         common::copy_shader_to_bundle(shader, &bundle_dir)?;
@@ -93,6 +98,12 @@ pub fn run(
         manifest
             .resources
             .extend(common::copy_data_path_to_bundle(data_path, &bundle_dir)?);
+    }
+    if let Some(icon_path) = &windows_icon {
+        common::copy_windows_icon_to_bundle(icon_path, &bundle_dir)?;
+        manifest
+            .resources
+            .push(PathBuf::from(common::WINDOWS_ICON_FILENAME));
     }
 
     // Assemble ghostty.conf — command references the renamed TUI binary
@@ -105,10 +116,21 @@ pub fn run(
     )?;
 
     // Copy runtime and TUI binary into bundle with renamed filenames
-    fs::copy(&runtime, bundle_dir.join(&manifest.runtime_name))
+    let bundled_runtime = bundle_dir.join(&manifest.runtime_name);
+    fs::copy(&runtime, &bundled_runtime)
         .with_context(|| format!("copying runtime to {}", bundle_dir.display()))?;
     fs::copy(&tui_binary, bundle_dir.join(&manifest.core_name))
         .with_context(|| format!("copying TUI binary to {}", bundle_dir.display()))?;
+    let stamped_runtime_icon = if let Some(icon_path) = &windows_icon {
+        super::windows_exe_icon::stamp_exe_icon(&bundled_runtime, icon_path).with_context(|| {
+            format!(
+                "stamping Windows app icon into {}",
+                bundled_runtime.display()
+            )
+        })?
+    } else {
+        false
+    };
     fs::write(
         bundle_dir.join(common::GHOSTTY_CONFIG_FILENAME),
         &config_bytes,
@@ -171,6 +193,16 @@ pub fn run(
     }
     for data_path in &data_paths {
         println!("  {}  (embedded data)", data_path.relative_path.display());
+    }
+    if windows_icon.is_some() {
+        println!("  {}  (Windows app icon)", common::WINDOWS_ICON_FILENAME);
+        if stamped_runtime_icon {
+            println!("  {}  (Windows exe icon stamped)", manifest.runtime_name);
+        } else if target.is_windows() {
+            eprintln!(
+                "Warning: Windows exe icon stamping is only available when packaging on Windows."
+            );
+        }
     }
 
     // Build packages unless bundle-only
