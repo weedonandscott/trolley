@@ -97,6 +97,13 @@ extern "kernel32" fn ExitProcess(
     uExitCode: u32,
 ) callconv(.winapi) noreturn;
 
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+
+extern "kernel32" fn SetConsoleCtrlHandler(
+    HandlerRoutine: ?*const fn (u32) callconv(.winapi) BOOL,
+    Add: BOOL,
+) callconv(.winapi) BOOL;
+
 extern "opengl32" fn wglGetProcAddress(
     lpszProc: [*:0]const u8,
 ) callconv(.winapi) ?*const fn () callconv(.winapi) void;
@@ -198,7 +205,19 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .min_height = 0,
     .max_width = 0,
     .max_height = 0,
+    .inject_pid_variable = null,
 };
+
+/// PID file path (set from TROLLEY_PID_FILE env var).
+var g_pid_file_path: ?[*:0]const u8 = null;
+
+/// Console control handler: delete PID file on Ctrl+C / close / shutdown.
+fn consoleCtrlHandler(_: u32) callconv(.winapi) BOOL {
+    if (g_pid_file_path) |path| {
+        std.fs.cwd().deleteFileZ(path) catch {};
+    }
+    return FALSE; // Let the default handler run (terminate process).
+}
 
 // ---------------------------------------------------------------------------
 // WGL ↔ ghostty OpenGL context bridge
@@ -860,6 +879,13 @@ pub fn main() !void {
     // -- Load bundled environment variables (must precede ghostty_init) --
     common.loadBundledEnvironment();
 
+    // -- Inject runtime PID as environment variable if configured --
+    var pid_buf: [16]u8 = undefined;
+    const pid_str = std.fmt.bufPrintZ(&pid_buf, "{d}", .{GetCurrentProcessId()}) catch unreachable;
+    if (g_window_config.inject_pid_variable) |varname| {
+        _ = common.setenvZ(varname, pid_str.ptr);
+    }
+
     // -- Register bundled fonts (must precede ghostty_init) --
     registerBundledFonts();
 
@@ -1009,6 +1035,24 @@ pub fn main() !void {
     // -- Show window --
     _ = wam.ShowWindow(hwnd, wam.SW_SHOW);
 
+    // -- Write PID file after successful init --
+    // Install cleanup handler before creating the file so cleanup is ready
+    // for an immediate signal.
+    if (common.getenvZ("TROLLEY_PID_FILE")) |path| {
+        g_pid_file_path = path;
+        _ = SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+
+        const file = std.fs.cwd().createFileZ(path, .{}) catch {
+            std.debug.print("trolley: failed to create PID file: {s}\n", .{path});
+            return error.PidFileCreateFailed;
+        };
+        file.writeAll(pid_str) catch {
+            std.debug.print("trolley: failed to write PID file: {s}\n", .{path});
+            return error.PidFileWriteFailed;
+        };
+        file.close();
+    }
+
     // -- Event loop --
     var msg: wam.MSG = undefined;
     while (true) {
@@ -1023,6 +1067,11 @@ pub fn main() !void {
 
         // Wait for next message or timeout (~16ms for 60fps)
         _ = MsgWaitForMultipleObjects(0, null, FALSE, 16, QS_ALLINPUT);
+    }
+
+    // Clean up PID file before exit.
+    if (g_pid_file_path) |path| {
+        std.fs.cwd().deleteFileZ(path) catch {};
     }
 
     ExitProcess(0);

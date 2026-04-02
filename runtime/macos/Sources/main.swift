@@ -10,7 +10,8 @@ var gSurface: ghostty_surface_t?
 var gApp: ghostty_app_t?
 var gWindowConfig = TrolleyGuiConfig(
     initial_width: 0, initial_height: 0, resizable: -1,
-    min_width: 0, min_height: 0, max_width: 0, max_height: 0
+    min_width: 0, min_height: 0, max_width: 0, max_height: 0,
+    inject_pid_variable: nil
 )
 
 // ---------------------------------------------------------------------------
@@ -459,6 +460,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // -- Load bundled environment variables (must precede ghostty_init) --
         loadBundledEnvironment()
 
+        // -- Inject runtime PID as environment variable if configured --
+        if let varname = gWindowConfig.inject_pid_variable {
+            setenv(String(cString: varname), "\(ProcessInfo.processInfo.processIdentifier)", 1)
+        }
+
         // -- Register bundled fonts --
         registerBundledFonts()
 
@@ -568,6 +574,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             NSApp.activate(ignoringOtherApps: true)
         }
+
+        // -- Write PID file after successful init --
+        // Install signal handlers before creating the file so cleanup is ready
+        // for an immediate signal.
+        let pidStr = "\(ProcessInfo.processInfo.processIdentifier)"
+        if let path = ProcessInfo.processInfo.environment["TROLLEY_PID_FILE"], !path.isEmpty {
+            for sig: Int32 in [SIGTERM, SIGINT] {
+                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+                signal(sig, SIG_IGN)
+                source.setEventHandler {
+                    try? FileManager.default.removeItem(atPath: path)
+                    // Re-raise with default handler for correct exit status.
+                    signal(sig, SIG_DFL)
+                    raise(sig)
+                }
+                source.resume()
+                withExtendedLifetime(source) {}
+                _ = Unmanaged.passRetained(source as AnyObject)
+            }
+
+            do {
+                try pidStr.write(toFile: path, atomically: true, encoding: .utf8)
+            } catch {
+                fputs("trolley: failed to write PID file \(path): \(error)\n", stderr)
+                exit(1)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -583,3 +616,8 @@ let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 app.delegate = delegate
 app.run()
+
+// Clean up PID file on exit.
+if let path = ProcessInfo.processInfo.environment["TROLLEY_PID_FILE"], !path.isEmpty {
+    try? FileManager.default.removeItem(atPath: path)
+}

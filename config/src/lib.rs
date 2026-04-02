@@ -391,11 +391,17 @@ pub struct Environment {
     pub env_file: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, String>,
+    /// If set, the runtime injects an environment variable with this name
+    /// containing the runtime process's PID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject_pid_variable: Option<String>,
 }
 
 impl Environment {
     pub fn is_default(&self) -> bool {
-        self.env_file.is_none() && self.variables.is_empty()
+        self.env_file.is_none()
+            && self.variables.is_empty()
+            && self.inject_pid_variable.is_none()
     }
 }
 
@@ -923,6 +929,8 @@ pub struct TrolleyGuiConfig {
     pub max_width: u32,
     /// Maximum height in pixels. 0 = unset.
     pub max_height: u32,
+    /// Environment variable name for PID injection. NULL = disabled.
+    pub inject_pid_variable: *const c_char,
 }
 
 /// Load a trolley manifest and extract the window and environment configs.
@@ -958,6 +966,17 @@ pub unsafe extern "C" fn trolley_load_manifest(
         window_config.min_height = manifest.gui.min_height.unwrap_or(0);
         window_config.max_width = manifest.gui.max_width.unwrap_or(0);
         window_config.max_height = manifest.gui.max_height.unwrap_or(0);
+
+        // inject_pid_variable from [environment].
+        // Intentionally leaked — the runtimes read this pointer for the entire process lifetime.
+        window_config.inject_pid_variable = match &manifest.environment.inject_pid_variable {
+            Some(name) if !name.is_empty() => {
+                let c_string = std::ffi::CString::new(name.as_str())
+                    .context("inject_pid_variable contains interior null byte")?;
+                c_string.into_raw() as *const c_char
+            }
+            _ => std::ptr::null(),
+        };
 
         // Report ghostty config length so the caller can allocate.
         let config_string = ghostty_config_string(&manifest);
