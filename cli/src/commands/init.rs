@@ -51,6 +51,7 @@ pub fn run(path: Option<String>) -> Result<()> {
     let windows = Some(Windows {
         binaries: all_arches,
         args: Vec::new(),
+        precise_timer: None,
     });
 
     let manifest = Config {

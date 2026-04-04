@@ -444,6 +444,12 @@ pub struct Windows {
     pub binaries: BTreeMap<Arch, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Request 1ms timer resolution via timeBeginPeriod.
+    /// Reduces timer jitter from ~15.6ms to ~1ms, improving animation
+    /// smoothness at the cost of slightly higher power consumption.
+    /// Defaults to true; set to false to opt out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precise_timer: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -923,6 +929,15 @@ pub struct TrolleyGuiConfig {
     pub max_width: u32,
     /// Maximum height in pixels. 0 = unset.
     pub max_height: u32,
+    /// Windows: request 1ms timer resolution. 0 = false, 1 = true (default).
+    pub win_precise_timer: u8,
+}
+
+fn windows_precise_timer_enabled(manifest: &Config) -> bool {
+    manifest
+        .windows
+        .as_ref()
+        .is_none_or(|windows| windows.precise_timer.unwrap_or(true))
 }
 
 /// Load a trolley manifest and extract the window and environment configs.
@@ -958,6 +973,7 @@ pub unsafe extern "C" fn trolley_load_manifest(
         window_config.min_height = manifest.gui.min_height.unwrap_or(0);
         window_config.max_width = manifest.gui.max_width.unwrap_or(0);
         window_config.max_height = manifest.gui.max_height.unwrap_or(0);
+        window_config.win_precise_timer = u8::from(windows_precise_timer_enabled(&manifest));
 
         // Report ghostty config length so the caller can allocate.
         let config_string = ghostty_config_string(&manifest);
@@ -1104,6 +1120,39 @@ binaries = { aarch64 = "my-app-mac" }
         assert_eq!(macos.binaries[&Arch::Aarch64], "my-app-mac");
         assert!(macos.args.is_empty());
         assert!(manifest.windows.is_none());
+    }
+
+    #[test]
+    fn windows_precise_timer_defaults_true_when_omitted() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        assert!(windows_precise_timer_enabled(&manifest));
+    }
+
+    #[test]
+    fn windows_precise_timer_can_be_disabled() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+precise_timer = false
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        assert!(!windows_precise_timer_enabled(&manifest));
     }
 
     // -----------------------------------------------------------------------
@@ -1735,7 +1784,9 @@ binaries = { x86_64 = "my-app" }
             toml::Value::String("foo.glsl".into()),
         );
         let err = m.validate().unwrap_err().to_string();
-        assert!(err.contains("[embeds] shaders cannot be used together with [ghostty] custom-shader"));
+        assert!(
+            err.contains("[embeds] shaders cannot be used together with [ghostty] custom-shader")
+        );
     }
 
     #[test]

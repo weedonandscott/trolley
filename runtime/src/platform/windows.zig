@@ -97,6 +97,14 @@ extern "kernel32" fn ExitProcess(
     uExitCode: u32,
 ) callconv(.winapi) noreturn;
 
+extern "winmm" fn timeBeginPeriod(
+    uPeriod: u32,
+) callconv(.winapi) u32;
+
+extern "winmm" fn timeEndPeriod(
+    uPeriod: u32,
+) callconv(.winapi) u32;
+
 extern "opengl32" fn wglGetProcAddress(
     lpszProc: [*:0]const u8,
 ) callconv(.winapi) ?*const fn () callconv(.winapi) void;
@@ -198,6 +206,7 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .min_height = 0,
     .max_width = 0,
     .max_height = 0,
+    .win_precise_timer = 1,
 };
 
 // ---------------------------------------------------------------------------
@@ -857,6 +866,11 @@ pub fn main() !void {
         _ = trolley.trolley_load_manifest(manifest_path.ptr, &g_window_config, &ghostty_len);
     }
 
+    const precise_timer = g_window_config.win_precise_timer != 0;
+    if (precise_timer) {
+        _ = timeBeginPeriod(1);
+    }
+
     // -- Load bundled environment variables (must precede ghostty_init) --
     common.loadBundledEnvironment();
 
@@ -1025,6 +1039,9 @@ pub fn main() !void {
         _ = MsgWaitForMultipleObjects(0, null, FALSE, 16, QS_ALLINPUT);
     }
 
+    if (precise_timer) {
+        _ = timeEndPeriod(1);
+    }
     ExitProcess(0);
 }
 

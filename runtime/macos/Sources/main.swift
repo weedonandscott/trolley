@@ -10,7 +10,8 @@ var gSurface: ghostty_surface_t?
 var gApp: ghostty_app_t?
 var gWindowConfig = TrolleyGuiConfig(
     initial_width: 0, initial_height: 0, resizable: -1,
-    min_width: 0, min_height: 0, max_width: 0, max_height: 0
+    min_width: 0, min_height: 0, max_width: 0, max_height: 0,
+    win_precise_timer: 0
 )
 
 // ---------------------------------------------------------------------------

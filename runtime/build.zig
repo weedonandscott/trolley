@@ -24,7 +24,7 @@ const Platform = struct {
                 .root_source_file = b.path("src/platform/windows.zig"),
                 .renderer = .opengl,
                 .font_backend = .fontconfig_freetype,
-                .system_libs = &.{ "opengl32", "gdi32", "user32", "mswsock", "userenv", "ws2_32", "ntdll", "dbghelp" },
+                .system_libs = &.{ "opengl32", "gdi32", "user32", "mswsock", "userenv", "ws2_32", "ntdll", "winmm" },
                 .lib_only = false,
             },
             .macos => .{

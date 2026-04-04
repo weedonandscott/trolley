@@ -165,6 +165,16 @@ If you need full shell quoting or arguments containing spaces, you must fall
 back to `[ghostty].command` and accept shell semantics. `args` cannot be used
 together with `[ghostty].command`.
 
+On Windows, 1ms timer resolution is enabled by default instead of the usual
+~15.6ms. This reduces timer jitter and can improve animation smoothness, but
+might slightly increase CPU usage. Set `precise_timer = false` to opt out.
+
+```toml
+[windows]
+binaries = { x86_64 = "path/to/app.exe" }
+precise_timer = false
+```
+
 ### `[gui]` -- optional
 
 `initial_width`, `initial_height`, `resizable`, `min_width`, `min_height`,
