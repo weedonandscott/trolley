@@ -436,6 +436,24 @@ pub struct Macos {
     pub binaries: BTreeMap<Arch, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// macOS titlebar style. Matches Ghostty's `macos-titlebar-style`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub titlebar_style: Option<MacosTitlebarStyle>,
+}
+
+/// Controls the macOS titlebar appearance.
+/// Values mirror Ghostty's `MacTitlebarStyle` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MacosTitlebarStyle {
+    /// Normal native macOS titlebar.
+    Native,
+    /// Transparent titlebar background; title text still shown.
+    Transparent,
+    /// Custom titlebar integrating tab bar (matches terminal background).
+    Tabs,
+    /// Titlebar hidden; window retains rounded corners and frame.
+    Hidden,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -931,6 +949,8 @@ pub struct TrolleyGuiConfig {
     pub max_height: u32,
     /// Windows: request 1ms timer resolution. 0 = false, 1 = true (default).
     pub win_precise_timer: u8,
+    /// macOS titlebar style. 0 = native, 1 = transparent, 2 = tabs, 3 = hidden.
+    pub macos_titlebar_style: u8,
 }
 
 fn windows_precise_timer_enabled(manifest: &Config) -> bool {
@@ -974,6 +994,16 @@ pub unsafe extern "C" fn trolley_load_manifest(
         window_config.max_width = manifest.gui.max_width.unwrap_or(0);
         window_config.max_height = manifest.gui.max_height.unwrap_or(0);
         window_config.win_precise_timer = u8::from(windows_precise_timer_enabled(&manifest));
+        window_config.macos_titlebar_style = match manifest
+            .macos
+            .as_ref()
+            .and_then(|m| m.titlebar_style)
+        {
+            None | Some(MacosTitlebarStyle::Native) => 0,
+            Some(MacosTitlebarStyle::Transparent) => 1,
+            Some(MacosTitlebarStyle::Tabs) => 2,
+            Some(MacosTitlebarStyle::Hidden) => 3,
+        };
 
         // Report ghostty config length so the caller can allocate.
         let config_string = ghostty_config_string(&manifest);
