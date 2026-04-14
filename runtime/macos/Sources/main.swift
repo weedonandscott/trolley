@@ -222,6 +222,7 @@ class TrolleyView: NSView, NSTextInputClient {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
@@ -438,6 +439,38 @@ class TrolleyView: NSView, NSTextInputClient {
         }
         mods |= Int32(momentum) << 1
         ghostty_surface_mouse_scroll(surface, x, y, mods)
+    }
+
+    // MARK: - Drag and drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            return .copy
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let surface = gSurface else { return false }
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else { return false }
+
+        let paths = urls.map { shellEscape($0.path) }
+        let text = paths.joined(separator: " ")
+
+        text.withCString { ptr in
+            ghostty_surface_text(surface, ptr, text.utf8.count)
+        }
+        return true
+    }
+
+    private func shellEscape(_ path: String) -> String {
+        if path.rangeOfCharacter(from: .init(charactersIn: " \t'\"\\!$`#&|;(){}[]<>?*~")) != nil {
+            return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        return path
     }
 }
 
