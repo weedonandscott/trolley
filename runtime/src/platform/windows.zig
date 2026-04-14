@@ -36,6 +36,7 @@ const WM_MBUTTONUP = 0x0208;
 const WM_MOUSEHWHEEL = 0x020E;
 const WM_GETMINMAXINFO = 0x0024;
 const WM_ERASEBKGND = 0x0014;
+const WM_DROPFILES = 0x0233;
 const QS_ALLINPUT = 0x04FF;
 
 const MINMAXINFO = extern struct {
@@ -104,6 +105,22 @@ extern "winmm" fn timeBeginPeriod(
 extern "winmm" fn timeEndPeriod(
     uPeriod: u32,
 ) callconv(.winapi) u32;
+
+extern "shell32" fn DragAcceptFiles(
+    hWnd: HWND,
+    fAccept: BOOL,
+) callconv(.winapi) void;
+
+extern "shell32" fn DragQueryFileW(
+    hDrop: ?*anyopaque,
+    iFile: u32,
+    lpszFile: ?[*]u16,
+    cch: u32,
+) callconv(.winapi) u32;
+
+extern "shell32" fn DragFinish(
+    hDrop: ?*anyopaque,
+) callconv(.winapi) void;
 
 extern "opengl32" fn wglGetProcAddress(
     lpszProc: [*:0]const u8,
@@ -738,6 +755,39 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // Suppress GDI background erase — OpenGL handles all rendering
             return 1;
         },
+        WM_DROPFILES => {
+            const surface = g_surface orelse return wam.DefWindowProcW(hwnd, msg, wParam, lParam);
+            const hDrop: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(wParam)));
+            defer DragFinish(hDrop);
+            const count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+            if (count == 0) return 0;
+
+            var buf: [8192]u8 = undefined;
+            var pos: usize = 0;
+            var path_buf: [1024]u16 = undefined;
+
+            for (0..count) |i| {
+                if (i > 0) {
+                    if (pos >= buf.len) break;
+                    buf[pos] = ' ';
+                    pos += 1;
+                }
+                const len = DragQueryFileW(hDrop, @intCast(i), &path_buf, path_buf.len);
+                if (len == 0) continue;
+                // Convert UTF-16 path to UTF-8
+                var utf8_path: [4096]u8 = undefined;
+                const utf8_len = std.unicode.utf16LeToUtf8(&utf8_path, path_buf[0..len]) catch continue;
+                const path = utf8_path[0..utf8_len];
+                const escaped_len = shellEscapeLen(path);
+                if (pos + escaped_len > buf.len) break;
+                pos = shellEscapeInto(&buf, pos, path);
+            }
+
+            if (pos > 0) {
+                ghostty.ghostty_surface_text(surface, &buf, pos);
+            }
+            return 0;
+        },
         wam.WM_DESTROY => {
             wam.PostQuitMessage(0);
             return 0;
@@ -748,6 +798,61 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
         },
         else => return wam.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shell escaping for drag-and-drop paths
+// ---------------------------------------------------------------------------
+fn shellEscapeLen(path: []const u8) usize {
+    if (!needsEscape(path)) return path.len;
+    var len: usize = 2; // opening and closing quotes
+    for (path) |c| {
+        len += if (c == '\'') 4 else 1;
+    }
+    return len;
+}
+
+fn shellEscapeInto(buf: []u8, start: usize, path: []const u8) usize {
+    var pos = start;
+    if (!needsEscape(path)) {
+        for (path) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+        return pos;
+    }
+    if (pos >= buf.len) return pos;
+    buf[pos] = '\'';
+    pos += 1;
+    for (path) |c| {
+        if (c == '\'') {
+            const esc = "'\\''";
+            for (esc) |e| {
+                if (pos >= buf.len) return pos;
+                buf[pos] = e;
+                pos += 1;
+            }
+        } else {
+            if (pos >= buf.len) return pos;
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    if (pos >= buf.len) return pos;
+    buf[pos] = '\'';
+    pos += 1;
+    return pos;
+}
+
+fn needsEscape(path: []const u8) bool {
+    const special = " \t'\"\\!$`#&|;(){}[]<>?*~";
+    for (path) |c| {
+        for (special) |s| {
+            if (c == s) return true;
+        }
+    }
+    return false;
 }
 
 // Path resolution delegated to common module:
@@ -935,6 +1040,7 @@ pub fn main() !void {
     ) orelse return error.CreateWindowFailed;
 
     g_hwnd = hwnd;
+    DragAcceptFiles(hwnd, TRUE);
 
     // -- Create modern OpenGL context --
     const gl_ctx = try createModernGLContext(hwnd);

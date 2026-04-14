@@ -346,6 +346,85 @@ fn contentScaleCallback(_: ?*glfw.GLFWwindow, xscale: f32, yscale: f32) callconv
     ghostty.ghostty_surface_set_content_scale(surface, xscale, yscale);
 }
 
+fn dropCallback(_: ?*glfw.GLFWwindow, count: c_int, paths: [*c]const [*c]const u8) callconv(.c) void {
+    const surface = g_surface orelse return;
+    if (count <= 0) return;
+
+    var buf: [8192]u8 = undefined;
+    var pos: usize = 0;
+
+    const n: usize = @intCast(count);
+    for (0..n) |i| {
+        if (i > 0) {
+            if (pos >= buf.len) break;
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        const path = std.mem.span(paths[i]);
+        const escaped_len = shellEscapeLen(path);
+        if (pos + escaped_len > buf.len) break;
+        pos = shellEscapeInto(&buf, pos, path);
+    }
+
+    if (pos > 0) {
+        ghostty.ghostty_surface_text(surface, &buf, pos);
+    }
+}
+
+fn shellEscapeLen(path: []const u8) usize {
+    if (!needsEscape(path)) return path.len;
+    // Quoted form: opening ' + content (each ' becomes '\'' = 4 chars) + closing '
+    var len: usize = 2; // quotes
+    for (path) |c| {
+        len += if (c == '\'') 4 else 1;
+    }
+    return len;
+}
+
+fn shellEscapeInto(buf: []u8, start: usize, path: []const u8) usize {
+    var pos = start;
+    if (!needsEscape(path)) {
+        for (path) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+        return pos;
+    }
+    if (pos >= buf.len) return pos;
+    buf[pos] = '\'';
+    pos += 1;
+    for (path) |c| {
+        if (c == '\'') {
+            // '\'' — end quote, escaped single quote, start quote
+            const esc = "'\\''";
+            for (esc) |e| {
+                if (pos >= buf.len) return pos;
+                buf[pos] = e;
+                pos += 1;
+            }
+        } else {
+            if (pos >= buf.len) return pos;
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    if (pos >= buf.len) return pos;
+    buf[pos] = '\'';
+    pos += 1;
+    return pos;
+}
+
+fn needsEscape(path: []const u8) bool {
+    const special = " \t'\"\\!$`#&|;(){}[]<>?*~";
+    for (path) |c| {
+        for (special) |s| {
+            if (c == s) return true;
+        }
+    }
+    return false;
+}
+
 fn translateMods(glfw_mods: c_int) ghostty.ghostty_input_mods_e {
     var mods: c_int = ghostty.GHOSTTY_MODS_NONE;
     if (glfw_mods & glfw.GLFW_MOD_SHIFT != 0) mods |= ghostty.GHOSTTY_MODS_SHIFT;
@@ -527,6 +606,7 @@ pub fn main() !void {
     _ = glfw.glfwSetFramebufferSizeCallback(window, &framebufferSizeCallback);
     _ = glfw.glfwSetWindowFocusCallback(window, &focusCallback);
     _ = glfw.glfwSetWindowContentScaleCallback(window, &contentScaleCallback);
+    _ = glfw.glfwSetDropCallback(window, &dropCallback);
 
     // -- Event loop --
     while (glfw.glfwWindowShouldClose(window) != glfw.GLFW_TRUE) {
