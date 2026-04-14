@@ -11,7 +11,7 @@ var gApp: ghostty_app_t?
 var gWindowConfig = TrolleyGuiConfig(
     initial_width: 0, initial_height: 0, resizable: -1,
     min_width: 0, min_height: 0, max_width: 0, max_height: 0,
-    win_precise_timer: 0
+    win_precise_timer: 0, macos_titlebar_style: 0
 )
 
 // ---------------------------------------------------------------------------
@@ -91,6 +91,24 @@ func actionCallback(
         return true
 
     case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+        return true
+
+    case GHOSTTY_ACTION_COLOR_CHANGE:
+        let cc = action.action.color_change
+        // Only update for background color changes, and only when titlebar is non-native
+        if cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND,
+           gWindowConfig.macos_titlebar_style != 0 {
+            let bgColor = NSColor(
+                red: CGFloat(cc.r) / 255.0,
+                green: CGFloat(cc.g) / 255.0,
+                blue: CGFloat(cc.b) / 255.0,
+                alpha: 1.0
+            )
+            gWindow?.backgroundColor = bgColor
+            // Rec. 601 luminance
+            let luminance = 0.299 * Double(cc.r) + 0.587 * Double(cc.g) + 0.114 * Double(cc.b)
+            gWindow?.appearance = NSAppearance(named: luminance > 128 ? .aqua : .darkAqua)
+        }
         return true
 
     default:
@@ -518,6 +536,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "trolley"
+
+        // Apply macOS titlebar style: 0=native, 1=transparent, 2=tabs, 3=hidden
+        switch gWindowConfig.macos_titlebar_style {
+        case 1, 2: // transparent, tabs
+            window.titlebarAppearsTransparent = true
+        case 3: // hidden
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+        default:
+            break
+        }
 
         // Min/max size limits (each dimension independent)
         if gWindowConfig.min_width > 0 || gWindowConfig.min_height > 0 {

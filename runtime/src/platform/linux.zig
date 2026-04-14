@@ -29,6 +29,7 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .max_width = 0,
     .max_height = 0,
     .win_precise_timer = 0,
+    .macos_titlebar_style = 0,
 };
 
 // ---------------------------------------------------------------------------
