@@ -46,7 +46,6 @@ const SM_CXICON = 11;
 const SM_CYICON = 12;
 const SM_CXSMICON = 49;
 const SM_CYSMICON = 50;
-const BUNDLED_WINDOW_ICON_FILENAME = "app.ico";
 
 const MINMAXINFO = extern struct {
     ptReserved: foundation.POINT,
@@ -242,7 +241,8 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
 };
 
 fn loadBundledWindowIcon(width: i32, height: i32) ?wam.HICON {
-    const path = common.getBundledPath(BUNDLED_WINDOW_ICON_FILENAME) orelse return null;
+    const icon_filename = std.mem.span(trolley.trolley_windows_icon_filename());
+    const path = common.getBundledPath(icon_filename) orelse return null;
     defer std.heap.page_allocator.free(path);
 
     const wide_path = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return null;

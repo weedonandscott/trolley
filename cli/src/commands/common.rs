@@ -10,7 +10,10 @@ pub const CONFIG_FILENAME: &str = "trolley.toml";
 pub const GHOSTTY_CONFIG_FILENAME: &str = "ghostty.conf";
 pub const ENVIRONMENT_FILENAME: &str = "environment";
 pub const FONTS_CONFIG_FILENAME: &str = "fonts.conf";
-pub const WINDOWS_ICON_FILENAME: &str = "app.ico";
+
+/// Bundled Windows icon filename as a `&str`; shares its source with the Zig
+/// runtime — see `trolley_config::windows_icon_filename_str`.
+pub use trolley_config::windows_icon_filename_str;
 
 // ---------------------------------------------------------------------------
 // ProjectContext — resolved config, paths, ready for commands
@@ -378,7 +381,7 @@ pub fn resolve_windows_icon(project_dir: &Path, config: &Config) -> Result<Optio
 }
 
 pub fn copy_windows_icon_to_bundle(icon_path: &Path, output_dir: &Path) -> Result<()> {
-    let dest = output_dir.join(WINDOWS_ICON_FILENAME);
+    let dest = output_dir.join(windows_icon_filename_str());
     std::fs::copy(icon_path, &dest).with_context(|| {
         format!(
             "copying Windows icon {} to {}",

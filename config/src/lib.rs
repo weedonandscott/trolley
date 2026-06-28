@@ -913,6 +913,25 @@ fn write_ghostty_value(out: &mut String, key: &str, value: &toml::Value) {
 // C ABI — used by the Zig/Swift runtimes
 // ---------------------------------------------------------------------------
 
+/// Single source of truth for the bundled Windows icon filename; reached only
+/// through the two accessors below, so the packager and runtime can't drift.
+const WINDOWS_ICON_FILENAME: &CStr = c"app.ico";
+
+/// The bundled Windows icon filename as a Rust `&str` (no trailing NUL), used by
+/// the packager to name and report the bundled icon. The Zig runtime reads the
+/// same name through [`trolley_windows_icon_filename`].
+pub fn windows_icon_filename_str() -> &'static str {
+    WINDOWS_ICON_FILENAME.to_str().expect("WINDOWS_ICON_FILENAME is ASCII")
+}
+
+/// C/Zig accessor: the bundled Windows icon filename as a NUL-terminated string.
+/// The Rust packager reads the same name through [`windows_icon_filename_str`].
+/// Zig: `std.mem.span(trolley.trolley_windows_icon_filename())`.
+#[unsafe(no_mangle)]
+pub extern "C" fn trolley_windows_icon_filename() -> *const c_char {
+    WINDOWS_ICON_FILENAME.as_ptr()
+}
+
 #[repr(C)]
 pub struct TrolleyGuiConfig {
     /// Initial width in pixels. 0 = unset.

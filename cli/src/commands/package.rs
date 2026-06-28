@@ -103,7 +103,7 @@ pub fn run(
         common::copy_windows_icon_to_bundle(icon_path, &bundle_dir)?;
         manifest
             .resources
-            .push(PathBuf::from(common::WINDOWS_ICON_FILENAME));
+            .push(PathBuf::from(common::windows_icon_filename_str()));
     }
 
     // Assemble ghostty.conf — command references the renamed TUI binary
@@ -195,7 +195,7 @@ pub fn run(
         println!("  {}  (embedded data)", data_path.relative_path.display());
     }
     if target.is_windows() && windows_icon.is_some() {
-        println!("  {}  (Windows app icon)", common::WINDOWS_ICON_FILENAME);
+        println!("  {}  (Windows app icon)", common::windows_icon_filename_str());
         if stamped_runtime_icon {
             println!("  {}  (Windows exe icon stamped)", manifest.runtime_name);
         } else {
