@@ -9,6 +9,9 @@ const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
 #[cfg(windows)]
 const MAIN_ICON_ID: u16 = 1;
+// Used by `stamp_exe_icon_windows` (Windows-only) and by tests; allow it to be
+// unused on a non-Windows, non-test build.
+#[cfg_attr(not(windows), allow(dead_code))]
 const FIRST_IMAGE_ID: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +96,9 @@ fn parse_ico(icon_path: &Path) -> Result<Vec<IconImage>> {
     Ok(images)
 }
 
+// Used by `stamp_exe_icon_windows` (Windows-only) and by tests; allow it to be
+// unused on a non-Windows, non-test build.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn build_group_icon_resource(images: &[IconImage]) -> Result<Vec<u8>> {
     let count = u16::try_from(images.len()).context("too many ICO images")?;
     let capacity = 6usize
