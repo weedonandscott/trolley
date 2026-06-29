@@ -175,6 +175,72 @@ binaries = { x86_64 = "path/to/app.exe" }
 precise_timer = false
 ```
 
+#### Code signing -- optional
+
+`[macos]` and `[windows]` accept a `signing` table. It holds only **non-secret
+selectors** -- all secret material (certificates, passwords, API keys, Azure
+credentials) is read from the **environment** at build time, so nothing secret
+goes in `trolley.toml`. Signing applies to the `nsis` (Windows) and `app`/`dmg`
+(macOS) formats.
+
+```toml
+[macos]
+binaries = { aarch64 = "...", x86_64 = "..." }
+# identity is optional; omit it to take APPLE_SIGNING_IDENTITY from the env.
+signing = { identity = "Developer ID Application: ACME Inc (TEAMID)" }
+# signing = { entitlements = "app.entitlements" }   # optional extras
+# signing = { identity = "-" }                      # ad-hoc (local dev only)
+
+[windows]
+binaries = { x86_64 = "..." }
+# Local cert in the Windows store (requires a Windows build host):
+signing = { thumbprint = "A1B2C3…", timestamp_url = "http://timestamp.digicert.com" }
+# …or a custom command such as Azure Artifact Signing (works on any host,
+# required when cross-compiling Windows from Linux/macOS). `%1` = file to sign:
+# signing = { sign_command = "trusted-signing-cli -e https://wus2.codesigning.azure.net -a MyAccount -c MyProfile -d MyApp %1" }
+```
+
+`[windows.signing]` requires at least one of `thumbprint` or `sign_command`.
+When signing via `thumbprint`, `timestamp_url` is **required**: a non-timestamped
+signature becomes invalid once the certificate expires, which would invalidate
+already-released binaries. On the `sign_command` path, timestamping is the
+command's job (Azure Artifact Signing does it automatically). Other optional
+keys: `digest_algorithm` (default `sha256`), `tsp`. macOS signatures are always
+timestamped automatically.
+
+#### macOS environment variables
+
+Read from the environment at build time. All are optional — supply only what
+your signing/notarization method needs:
+
+| Purpose | Variables |
+| --- | --- |
+| Signing identity (if not set in config) | `APPLE_SIGNING_IDENTITY` |
+| Certificate on CI (else the keychain is used) | `APPLE_CERTIFICATE` (base64 `.p12`) + `APPLE_CERTIFICATE_PASSWORD` |
+| Notarization — pick one group | `APPLE_KEYCHAIN_PROFILE` · or `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` · or `APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH` |
+
+`APPLE_API_KEY_PATH` may be omitted if the `AuthKey_<KEY>.p8` file sits in
+`./private_keys`, `~/private_keys`, `~/.private_keys`, or
+`~/.appstoreconnect/private_keys`. A signed macOS build automatically gets the
+hardened runtime + a secure timestamp, and is notarized (then stapled) when one
+notarization group is present — otherwise it is signed but not notarized. macOS
+sign/notarize must run on a macOS host.
+
+#### Windows environment variables
+
+**trolley itself reads no Windows env vars** — all Windows signing configuration
+lives in `[windows.signing]` above. The `thumbprint` path needs none (the cert
+comes from the Windows certificate store). On the `sign_command` path, the env
+vars that matter are the ones **the tool in your command** reads, e.g.:
+
+| Tool | Variables |
+| --- | --- |
+| Azure Artifact Signing (`trusted-signing-cli`) | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` |
+| DigiCert KeyLocker (`smctl`/`signtool`) | `SM_HOST`, `SM_API_KEY`, `SM_CLIENT_CERT_FILE`, `SM_CLIENT_CERT_PASSWORD` |
+
+Consult your signing tool's docs for its exact variables; trolley just runs the
+command you give it.
+
 ### `[gui]` -- optional
 
 `initial_width`, `initial_height`, `resizable`, `min_width`, `min_height`,

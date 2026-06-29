@@ -436,6 +436,8 @@ pub struct Macos {
     pub binaries: BTreeMap<Arch, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<MacosSigning>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -450,6 +452,8 @@ pub struct Windows {
     /// Defaults to true; set to false to opt out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precise_timer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<WindowsSigning>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -457,6 +461,64 @@ pub struct Windows {
 pub struct AppImageConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<String>,
+}
+
+/// macOS code-signing / notarization settings (non-secret selectors only).
+///
+/// All secret material is read from the environment by the `cargo-packager` library at
+/// build time, so it never lives in `trolley.toml`:
+/// - cert on CI: `APPLE_CERTIFICATE` (+ `APPLE_CERTIFICATE_PASSWORD`) — auto-imported into a
+///   temporary keychain.
+/// - notarization (one set): `APPLE_KEYCHAIN_PROFILE`; or
+///   `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID`; or
+///   `APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`.
+///
+/// Codesigning automatically enables the hardened runtime + a secure timestamp, so a signed
+/// build is notarization-eligible. Setting `identity = "-"` produces an ad-hoc signature
+/// (local dev only — still Gatekeeper-warned, never notarized).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosSigning {
+    /// Signing identity, e.g. `"Developer ID Application: ACME Inc (TEAMID)"`.
+    ///
+    /// Optional: when omitted, the `APPLE_SIGNING_IDENTITY` environment variable is used at
+    /// build time instead (so CI can sign without editing config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// Optional path to an entitlements `.plist` (passed to `codesign --entitlements`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlements: Option<String>,
+}
+
+/// Windows Authenticode signing settings (non-secret selectors only).
+///
+/// Provide either `thumbprint` (a cert in the Windows certificate store; requires a Windows
+/// build host) or `sign_command` (a custom tool such as Azure Artifact Signing; works on any
+/// host and is required when cross-compiling from Linux/macOS). The `sign_command` tool reads
+/// its own secrets (e.g. `AZURE_*`) from the environment.
+///
+/// When signing via `thumbprint`, `timestamp_url` is **required** — a non-timestamped
+/// signature stops being valid once the certificate expires, which would invalidate
+/// already-released binaries. On the `sign_command` path, timestamping is the command's
+/// responsibility (Azure Artifact Signing timestamps automatically).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSigning {
+    /// SHA-1 thumbprint of a certificate in the Windows certificate store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbprint: Option<String>,
+    /// Custom signing command. `%1` is replaced with the file path to sign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_command: Option<String>,
+    /// RFC3161 timestamp server URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_url: Option<String>,
+    /// Signature digest algorithm; cargo-packager defaults to `sha256` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_algorithm: Option<String>,
+    /// Use the RFC3161 Time-Stamp Protocol (`signtool /tr`+`/td`) instead of `/t`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tsp: bool,
 }
 
 /// Default environment variables always injected by trolley.
@@ -559,6 +621,16 @@ impl Config {
                 }
             }
             validate_platform_args("[macos]", &macos.args, &mut errors);
+            // identity is optional (falls back to APPLE_SIGNING_IDENTITY at build time), but
+            // an explicitly-provided one must not be blank.
+            if let Some(signing) = &macos.signing {
+                if matches!(&signing.identity, Some(id) if id.trim().is_empty()) {
+                    errors.push("[macos.signing] identity must not be empty".into());
+                }
+                if matches!(&signing.entitlements, Some(e) if e.trim().is_empty()) {
+                    errors.push("[macos.signing] entitlements must not be empty".into());
+                }
+            }
         }
         if let Some(ref windows) = self.windows {
             if windows.binaries.is_empty() {
@@ -572,6 +644,48 @@ impl Config {
                 }
             }
             validate_platform_args("[windows]", &windows.args, &mut errors);
+            // Signing needs exactly one of thumbprint / sign_command. Neither means
+            // cargo-packager cannot sign (silent unsigned installer); both means one is
+            // silently ignored (the library always prefers sign_command).
+            if let Some(signing) = &windows.signing {
+                match (&signing.thumbprint, &signing.sign_command) {
+                    (None, None) => errors.push(
+                        "[windows.signing] requires either `thumbprint` or `sign_command`".into(),
+                    ),
+                    (Some(_), Some(_)) => errors.push(
+                        "[windows.signing] set only one of `thumbprint` or `sign_command` \
+                         (cargo-packager silently prefers `sign_command` when both are present)"
+                            .into(),
+                    ),
+                    _ => {}
+                }
+                // The custom command must receive the file to sign via a standalone `%1`
+                // token; otherwise cargo-packager never passes it the file.
+                if let Some(cmd) = &signing.sign_command {
+                    if !cmd.split_whitespace().any(|t| t == "%1") {
+                        errors.push(
+                            "[windows.signing] `sign_command` must contain a `%1` token \
+                             (replaced with the file path to sign)"
+                                .into(),
+                        );
+                    }
+                }
+                // Always timestamp: the built-in signtool path (thumbprint, no custom command)
+                // only timestamps when a URL is given. A non-timestamped signature becomes
+                // invalid once the certificate expires, breaking already-released binaries.
+                // The sign_command path is opaque, so its timestamping is the command's job.
+                if signing.sign_command.is_none()
+                    && signing.thumbprint.is_some()
+                    && signing.timestamp_url.is_none()
+                {
+                    errors.push(
+                        "[windows.signing] `timestamp_url` is required when signing with \
+                         `thumbprint` (timestamped signatures stay valid after the certificate \
+                         expires)"
+                            .into(),
+                    );
+                }
+            }
         }
 
         // Window dimension checks
@@ -1172,6 +1286,213 @@ precise_timer = false
 "#;
         let manifest: Config = toml::from_str(toml_str).unwrap();
         assert!(!windows_precise_timer_enabled(&manifest));
+    }
+
+    // -----------------------------------------------------------------------
+    // Signing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_signing_sections() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[macos]
+binaries = { aarch64 = "my-app-mac" }
+signing = { identity = "Developer ID Application: ACME (TEAMID)", entitlements = "app.entitlements" }
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { thumbprint = "A1B2C3", timestamp_url = "http://ts.example", tsp = true }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        manifest.validate().unwrap();
+
+        let macos = manifest.macos.unwrap().signing.unwrap();
+        assert_eq!(
+            macos.identity.as_deref(),
+            Some("Developer ID Application: ACME (TEAMID)")
+        );
+        assert_eq!(macos.entitlements.as_deref(), Some("app.entitlements"));
+
+        let win = manifest.windows.unwrap().signing.unwrap();
+        assert_eq!(win.thumbprint.as_deref(), Some("A1B2C3"));
+        assert_eq!(win.sign_command, None);
+        assert_eq!(win.timestamp_url.as_deref(), Some("http://ts.example"));
+        assert!(win.tsp);
+    }
+
+    #[test]
+    fn signing_windows_sign_command_only() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { sign_command = "trusted-signing-cli -e https://x -a A -c C %1" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        manifest.validate().unwrap();
+        let win = manifest.windows.unwrap().signing.unwrap();
+        assert!(win.thumbprint.is_none());
+        assert_eq!(
+            win.sign_command.as_deref(),
+            Some("trusted-signing-cli -e https://x -a A -c C %1")
+        );
+    }
+
+    #[test]
+    fn signing_macos_identity_optional() {
+        // A bare `signing = {}` is valid: the identity falls back to APPLE_SIGNING_IDENTITY.
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[macos]
+binaries = { aarch64 = "my-app-mac" }
+signing = {}
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        manifest.validate().unwrap();
+        let macos = manifest.macos.unwrap().signing.unwrap();
+        assert!(macos.identity.is_none());
+    }
+
+    #[test]
+    fn validate_windows_signing_requires_thumbprint_or_command() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { timestamp_url = "http://ts.example" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("[windows.signing]"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_windows_thumbprint_requires_timestamp() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { thumbprint = "A1B2C3" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("timestamp_url"), "got: {err}");
+    }
+
+    #[test]
+    fn signing_sign_command_needs_no_timestamp_url() {
+        // The custom-command path handles its own timestamping, so no timestamp_url is required.
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { sign_command = "trusted-signing-cli -e https://x -a A -c C %1" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_macos_signing_empty_identity() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[macos]
+binaries = { aarch64 = "my-app-mac" }
+signing = { identity = "  " }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("[macos.signing]"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_windows_signing_rejects_both() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { thumbprint = "A1B2C3", sign_command = "tool %1", timestamp_url = "http://ts.example" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("only one"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_windows_sign_command_requires_placeholder() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+signing = { sign_command = "trusted-signing-cli -e https://x -a A -c C" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("%1"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_macos_signing_empty_entitlements() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+[macos]
+binaries = { aarch64 = "my-app-mac" }
+signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "  " }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let err = manifest.validate().unwrap_err().to_string();
+        assert!(err.contains("[macos.signing]"), "got: {err}");
     }
 
     // -----------------------------------------------------------------------

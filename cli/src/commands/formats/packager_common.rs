@@ -118,6 +118,50 @@ fn build_packager_config(
         packager_config.deb = Some(deb);
     }
 
+    // Code-signing: only the matching platform's config is applied. The signing structs hold
+    // non-secret selectors; cargo-packager reads cert material / notarization / Azure creds
+    // from the environment itself.
+    match manifest.variant {
+        BundleVariant::MacOs => {
+            if let Some(signing) = config.macos.as_ref().and_then(|m| m.signing.as_ref()) {
+                // Identity from config, else the APPLE_SIGNING_IDENTITY env var (Tauri parity).
+                // Drop an empty/whitespace env value so it falls through to the bail! below
+                // instead of producing a confusing `codesign -s ""`.
+                let identity = signing.identity.clone().or_else(|| {
+                    std::env::var("APPLE_SIGNING_IDENTITY")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                });
+                let Some(identity) = identity else {
+                    anyhow::bail!(
+                        "[macos.signing] is set but no signing identity was found: set \
+                         `identity` in trolley.toml or the APPLE_SIGNING_IDENTITY env var"
+                    );
+                };
+                let mut macos = cargo_packager::config::MacOsConfig::default();
+                macos.signing_identity = Some(identity);
+                macos.entitlements = signing.entitlements.clone();
+                packager_config.macos = Some(macos);
+                // notarization_credentials + cert material left unset on purpose:
+                // cargo-packager reads APPLE_* / APPLE_CERTIFICATE* from the environment.
+            }
+        }
+        BundleVariant::Windows => {
+            if let Some(signing) = config.windows.as_ref().and_then(|w| w.signing.as_ref()) {
+                let mut win = cargo_packager::config::WindowsConfig::default();
+                win.certificate_thumbprint = signing.thumbprint.clone();
+                win.sign_command = signing.sign_command.clone();
+                win.timestamp_url = signing.timestamp_url.clone();
+                if let Some(digest) = &signing.digest_algorithm {
+                    win.digest_algorithm = Some(digest.clone());
+                }
+                win.tsp = signing.tsp;
+                packager_config.windows = Some(win);
+            }
+        }
+        BundleVariant::Linux { .. } => {}
+    }
+
     Ok(packager_config)
 }
 
