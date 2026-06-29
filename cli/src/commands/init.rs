@@ -47,11 +47,13 @@ pub fn run(path: Option<String>) -> Result<()> {
     let macos = Some(Macos {
         binaries: all_arches.clone(),
         args: Vec::new(),
+        signing: None,
     });
     let windows = Some(Windows {
         binaries: all_arches,
         args: Vec::new(),
         precise_timer: None,
+        signing: None,
     });
 
     let manifest = Config {

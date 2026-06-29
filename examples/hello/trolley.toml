@@ -9,9 +9,13 @@ binaries = { x86_64 = "zig-out/bin/hello" }
 
 [macos]
 binaries = { aarch64 = "zig-out/bin/hello", x86_64 = "zig-out/bin/hello" }
+# Code signing (see README). Secrets come from the environment, not here:
+# signing = { identity = "Developer ID Application: ACME Inc (TEAMID)" }
 
 [windows]
 binaries = { x86_64 = "zig-out/bin/hello.exe" }
+# signing = { thumbprint = "A1B2C3…", timestamp_url = "http://timestamp.digicert.com" }
+# signing = { sign_command = "trusted-signing-cli -e https://… -a Acct -c Profile -d Hello %1" }
 
 [gui]
 initial_width = 400
