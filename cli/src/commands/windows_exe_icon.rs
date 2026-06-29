@@ -191,6 +191,8 @@ fn stamp_exe_icon_windows(exe_path: &Path, images: &[IconImage]) -> Result<()> {
     }
 
     let exe_wide = wide_os(exe_path.as_os_str());
+    // `0` keeps existing resources; the Zig runtime exe ships with no icon
+    // resources, so there is nothing to purge.
     let update = unsafe { BeginUpdateResourceW(exe_wide.as_ptr(), 0) };
     if update.is_null() {
         return Err(std::io::Error::last_os_error()).context("BeginUpdateResourceW failed");
@@ -237,11 +239,14 @@ fn stamp_exe_icon_windows(exe_path: &Path, images: &[IconImage]) -> Result<()> {
             .context("UpdateResourceW failed for RT_GROUP_ICON");
     }
 
-    let ok = unsafe { EndUpdateResourceW(guard.0, 0) };
+    // Detach the guard before committing: EndUpdateResourceW closes the handle
+    // even on failure, so Drop must not call it a second time.
+    let handle = guard.0;
+    guard.0 = ptr::null_mut();
+    let ok = unsafe { EndUpdateResourceW(handle, 0) };
     if ok == 0 {
         return Err(std::io::Error::last_os_error()).context("EndUpdateResourceW failed");
     }
-    guard.0 = ptr::null_mut();
 
     Ok(())
 }
