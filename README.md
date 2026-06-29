@@ -318,6 +318,10 @@ To support all platforms, provide multiple icons:
 icons = ["assets/icon.png", "assets/icon.ico", "assets/icon.icns"]
 ```
 
+On Windows, the first resolved `.ico` is bundled into the runtime for the app
+window icon, and when packaging on Windows it is also embedded into the bundled
+`*_runtime.exe`.
+
 Glob patterns are also supported (e.g. `"assets/icon.*"`).
 
 ## Package formats
