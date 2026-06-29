@@ -254,12 +254,12 @@ fn loadBundledWindowIcon(width: i32, height: i32) ?wam.HICON {
 
 fn applyWindowIcons(hwnd: HWND) void {
     if (g_window_icon_big) |icon| {
-        _ = SendMessageW(hwnd, WM_SETICON, ICON_BIG, @as(LPARAM, @intCast(@intFromPtr(icon))));
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_BIG, @as(LPARAM, @bitCast(@intFromPtr(icon))));
     }
     if (g_window_icon_small) |icon| {
-        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @intCast(@intFromPtr(icon))));
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @bitCast(@intFromPtr(icon))));
     } else if (g_window_icon_big) |icon| {
-        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @intCast(@intFromPtr(icon))));
+        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @bitCast(@intFromPtr(icon))));
     }
 }
 
