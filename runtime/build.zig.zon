@@ -6,8 +6,8 @@
     .dependencies = .{
         .ghostty = .{ .path = "../ghostty" },
         .zigwin32 = .{
-            .url = "https://github.com/marlersoft/zigwin32/archive/3be22a8d33d330662b1fbb5b68c9411bf0293e27.tar.gz",
-            .hash = "zigwin32-25.0.28-preview-AAAAAB6N5AP3iLHsHKzg7r_aiDyYWo92qLOAG2eBLWhE",
+            .url = "https://github.com/marlersoft/zigwin32/archive/ec98bb4d9eea532320a8551720a9e3ec6de64994.tar.gz",
+            .hash = "win32-25.0.28-preview-mX5pFWMt5QPTVIGh3r2-OpPunpcCCjApyRbA6Zn6WALH",
             .lazy = true,
         },
         .glfw = .{
