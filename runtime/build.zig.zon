@@ -1,6 +1,6 @@
 .{
     .name = .trolley,
-    .version = "0.6.1",
+    .version = "0.7.0",
     .fingerprint = 0xd9ad4b953f1bc109,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{

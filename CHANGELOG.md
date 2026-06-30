@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+### Runtime
+
+- [windows] Add precise timer (#26)
+- [windows] Fix exe icon embedding / WM_SETICON safe-build panic (#28)
+- [windows] Update zigwin32 (#33)
+
+### CLI
+
+- [all] Add `[embeds]` config: embeddable theme, custom shaders, embedded data paths (#23)
+- [all] Support per-platform CLI arguments for the bundled TUI (#25)
+- [windows] Embed icons into the runtime exe (#28)
+- [windows, macos] Add code signing support (#32)
+- [all] Update Rust dependencies (#33)
+
 ## 0.6.1
 
 ### Runtime
