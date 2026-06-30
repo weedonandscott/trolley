@@ -30,7 +30,7 @@ fn resolve_png_icons(config: &Config) -> Result<Vec<PathBuf>> {
 fn png_dimensions(path: &Path) -> Result<(u32, u32)> {
     let file = File::open(path)
         .with_context(|| format!("opening icon {}", path.display()))?;
-    let decoder = png::Decoder::new(file);
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let reader = decoder.read_info()
         .with_context(|| format!("reading PNG header of {}", path.display()))?;
     let info = reader.info();
@@ -74,16 +74,13 @@ pub fn build(
         "Proprietary",
         arch,
         &config.app.display_name,
-    )
-    .compression(rpm::CompressionWithLevel::Gzip(6));
+    );
+    builder.using_config(
+        rpm::BuildConfig::default().compression(rpm::CompressionWithLevel::Gzip(6)),
+    );
 
     // Add the install prefix directory
-    let empty_file_path = staging.join("empty");
-    File::create(&empty_file_path)?;
-    builder = builder.with_file(
-        &empty_file_path,
-        FileOptions::new(install_prefix).mode(FileMode::Dir { permissions: 0o755 }),
-    )?;
+    builder.with_dir_entry(FileOptions::dir(install_prefix).mode(FileMode::dir(0o755)))?;
 
     for entry in WalkDir::new(bundle_dir) {
         let entry = entry.context("walking bundle directory")?;
@@ -99,18 +96,15 @@ pub fn build(
         let dest_path = format!("{install_prefix}/{}", rel_path.display());
 
         if entry.file_type().is_dir() {
-            builder = builder.with_file(
-                &empty_file_path,
-                FileOptions::new(dest_path).mode(FileMode::Dir { permissions: 0o755 }),
-            )?;
+            builder.with_dir_entry(FileOptions::dir(dest_path).mode(FileMode::dir(0o755)))?;
         } else {
             let file_name = rel_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let mode = if executables.contains(&file_name) {
-                FileMode::Regular { permissions: 0o755 }
+                FileMode::regular(0o755)
             } else {
-                FileMode::Regular { permissions: 0o644 }
+                FileMode::regular(0o644)
             };
-            builder = builder.with_file(src_path, FileOptions::new(dest_path).mode(mode))?;
+            builder.with_file(src_path, FileOptions::new(dest_path).mode(mode))?;
         }
     }
 
@@ -127,10 +121,10 @@ pub fn build(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755))?;
     }
-    builder = builder.with_file(
+    builder.with_file(
         &wrapper_path,
         FileOptions::new(format!("/usr/bin/{}", config.app.slug))
-            .mode(FileMode::Regular { permissions: 0o755 }),
+            .mode(FileMode::regular(0o755)),
     )?;
 
     // Install PNG icons into /usr/share/icons/hicolor/<WxH>/apps/<slug>.png
@@ -140,9 +134,9 @@ pub fn build(
             "/usr/share/icons/hicolor/{width}x{height}/apps/{}.png",
             config.app.slug
         );
-        builder = builder.with_file(
+        builder.with_file(
             &icon_path,
-            FileOptions::new(dest).mode(FileMode::Regular { permissions: 0o644 }),
+            FileOptions::new(dest).mode(FileMode::regular(0o644)),
         )?;
     }
 
