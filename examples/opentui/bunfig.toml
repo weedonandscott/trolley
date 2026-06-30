@@ -1,0 +1,9 @@
+# Supply-chain protection for the opentui example's bun dependencies.
+#
+# Committed (not machine-local) so it applies on every clone and in CI — a
+# ~/.bunfig.toml only protects one machine and gives a false sense of safety.
+[install]
+# Only install package versions published at least this many seconds ago, so a
+# freshly-published (possibly compromised) release isn't eligible until it has
+# had time to be caught and yanked. 604800 = 7 days.
+minimumReleaseAge = 604800
