@@ -176,15 +176,46 @@ fn closeSurfaceCallback(_: ?*anyopaque, _: bool) callconv(.c) void {
 // ---------------------------------------------------------------------------
 // GLFW input callbacks → ghostty
 //
-// Two-phase key input (same pattern as ghostty's deleted GLFW apprt):
-//   1. keyCallback sends the key event with inferred ASCII text.
-//   2. If ghostty ignores it (not consumed), we store the event.
-//   3. charCallback fires with the real Unicode codepoint, updates the
-//      stored event's text, and re-sends it to ghostty.
+// Key input runs one of two protocols:
+//
+// Deferral (primary): keyCallback withholds printable press/repeat events
+// with no ctrl/alt/super; charCallback — invoked by GLFW synchronously
+// right after, in the same OS event — attaches the layout-produced text
+// plus consumed_mods and sends once. This also carries most composition:
+// dead-key/Compose output is delivered inside the finishing keystroke's
+// own event, completing that key's deferral. A deferred press whose char
+// never arrives (e.g. the dead-key press itself) is sent textless by
+// flushDeferred at the next keyCallback or after glfwWaitEvents.
+//
+// Send-then-retry (fallback): everything else is sent immediately (ctrl
+// combos with synthesized text, other keys textless). If ghostty reports
+// the event not consumed, it is parked; a charCallback with no deferred
+// press (async IM commits delivered outside the keystroke's own event)
+// re-sends the parked event with that text.
 // ---------------------------------------------------------------------------
 var g_pending_key_event: ?ghostty.ghostty_input_key_s = null;
 var g_pending_text_buf: [5]u8 = undefined;
 var g_key_text_buf: [5]u8 = undefined;
+
+/// Press/repeat withheld from ghostty until charCallback supplies text.
+/// GLFW invokes the char callback synchronously right after the key
+/// callback, within the same OS event, so a deferred press is completed
+/// (or flushed) before the next key event.
+var g_deferred_key_event: ?ghostty.ghostty_input_key_s = null;
+
+/// Send a deferred press whose charCallback never fired (dead keys,
+/// XIM-filtered presses). A not-consumed event is parked for the retry
+/// path; note the keyCallback-entry call site clears that parking slot
+/// shortly after, so the retry is only reachable from the main-loop flush.
+fn flushDeferred() void {
+    const key_event = g_deferred_key_event orelse return;
+    g_deferred_key_event = null;
+    const surface = g_surface orelse return;
+    const consumed = ghostty.ghostty_surface_key(surface, key_event);
+    if (!consumed) {
+        g_pending_key_event = key_event;
+    }
+}
 
 fn keyCallback(
     _: ?*glfw.GLFWwindow,
@@ -193,6 +224,9 @@ fn keyCallback(
     glfw_action: c_int,
     glfw_mods: c_int,
 ) callconv(.c) void {
+    // Complete any leftover deferred press before handling a new key.
+    flushDeferred();
+
     const surface = g_surface orelse return;
 
     const action: ghostty.ghostty_input_action_e = switch (glfw_action) {
@@ -216,6 +250,12 @@ fn keyCallback(
     // keyval_unicode_unshifted. Required for Kitty keyboard protocol encoding
     // and legacy ctrl+shift+letter handling.
     const unshifted_codepoint: u32 = uc: {
+        // glfwGetKeyName's key filter (input.c) returns NULL for
+        // GLFW_KEY_SPACE even though its unshifted character is
+        // well-defined. Without a codepoint the kitty encoder has no
+        // entry for space, so modified-space chords (ctrl/alt+space)
+        // encode nothing and get dropped.
+        if (glfw_key == glfw.GLFW_KEY_SPACE) break :uc 0x20;
         const key_name = glfw.glfwGetKeyName(glfw_key, scancode);
         if (key_name) |name_ptr| {
             const name: [*:0]const u8 = name_ptr;
@@ -258,6 +298,19 @@ fn keyCallback(
     // Clear any previous pending event.
     g_pending_key_event = null;
 
+    // Defer printable, modifier-free presses until charCallback supplies
+    // the layout text. Sending them textless would let the kitty encoder
+    // consume the press (from unshifted_codepoint alone), so the retry
+    // below never fires and shifted symbols like shift+1 → "!" get lost.
+    if ((action == ghostty.GHOSTTY_ACTION_PRESS or
+        action == ghostty.GHOSTTY_ACTION_REPEAT) and
+        (glfw_mods & (glfw.GLFW_MOD_CONTROL | glfw.GLFW_MOD_ALT | glfw.GLFW_MOD_SUPER)) == 0 and
+        unshifted_codepoint >= 0x20)
+    {
+        g_deferred_key_event = key_event;
+        return;
+    }
+
     const consumed = ghostty.ghostty_surface_key(surface, key_event);
 
     // If ghostty didn't consume this press/repeat, store it so charCallback
@@ -272,6 +325,40 @@ fn keyCallback(
 fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
     const surface = g_surface orelse return;
 
+    // Complete a press deferred by keyCallback in this same OS event: the
+    // codepoint here is the layout-produced text for that press.
+    if (g_deferred_key_event) |deferred| {
+        g_deferred_key_event = null;
+        var key_event = deferred;
+
+        // If the codepoint can't be encoded, send the press textless: the
+        // keystroke is still valid, only the text half failed. Unlike
+        // flushDeferred we don't park a not-consumed result — the char
+        // already arrived and was garbage, there is nothing to retry with.
+        text: {
+            const cp: u21 = std.math.cast(u21, codepoint) orelse break :text;
+            const len = std.unicode.utf8Encode(cp, &g_pending_text_buf) catch break :text;
+            if (len < g_pending_text_buf.len) {
+                g_pending_text_buf[len] = 0;
+            }
+
+            key_event.text = &g_pending_text_buf;
+            // Shift/caps were consumed by the translation only if they
+            // actually changed the produced character (shift+1 → "!").
+            // If the char equals the unshifted codepoint (shift+space
+            // → " "), claiming consumption would strip the modifier and
+            // ghostty would send plain text instead of a CSI sequence.
+            // Keep the press-time unshifted_codepoint: overwriting it
+            // with the shifted char would corrupt kitty/CSIu key codes.
+            if (codepoint != key_event.unshifted_codepoint) {
+                key_event.consumed_mods = key_event.mods &
+                    (ghostty.GHOSTTY_MODS_SHIFT | ghostty.GHOSTTY_MODS_CAPS);
+            }
+        }
+        _ = ghostty.ghostty_surface_key(surface, key_event);
+        return;
+    }
+
     // charCallback only matters if we have a pending (ignored) key event.
     var key_event = g_pending_key_event orelse return;
     g_pending_key_event = null;
@@ -285,9 +372,10 @@ fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
         g_pending_text_buf[len] = 0;
     }
 
-    // Update the key event with the real text and codepoint.
+    // Update the key event with the real text. Keep the press-time
+    // unshifted_codepoint: overwriting it with the produced char would
+    // corrupt kitty/CSIu key codes.
     key_event.text = &g_pending_text_buf;
-    key_event.unshifted_codepoint = codepoint;
 
     // Re-send the key event to ghostty with the text populated.
     _ = ghostty.ghostty_surface_key(surface, key_event);
@@ -532,6 +620,9 @@ pub fn main() !void {
     while (glfw.glfwWindowShouldClose(window) != glfw.GLFW_TRUE) {
         ghostty.ghostty_app_tick(app);
         glfw.glfwWaitEvents();
+        // Complete any press whose charCallback never fired within the
+        // batch just processed (dead keys, XIM-filtered presses).
+        flushDeferred();
     }
 
     // Exit immediately. Ghostty's Surface.deinit assumes the GL context

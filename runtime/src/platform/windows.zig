@@ -496,7 +496,11 @@ fn closeClipboard() void {
 }
 
 // ---------------------------------------------------------------------------
-// Two-phase key input (same pattern as Linux runtime)
+// Key input: WM_KEYDOWN peeks the WM_CHARs the pump already translated for
+// this keystroke and sends one complete event (text + consumed_mods). The
+// pending/retry state below is the fallback for text the peek cannot see —
+// chars posted outside keydown dispatch (e.g. IME commits) arrive at the
+// WM_CHAR handler and complete a parked not-consumed event.
 // ---------------------------------------------------------------------------
 var g_pending_key_event: ?ghostty.ghostty_input_key_s = null;
 var g_pending_text_buf: [5]u8 = undefined;
@@ -536,6 +540,49 @@ fn extractScancode(lParam: LPARAM) u32 {
     return scan | (extended * 0xe000);
 }
 
+/// Combine UTF-16 code units from WM_CHAR into a codepoint. Codepoints
+/// above U+FFFF arrive as two WM_CHAR messages (high surrogate, then low),
+/// tracked across calls via g_high_surrogate. Returns null while waiting
+/// for the low half or on an orphaned low surrogate.
+fn combineSurrogate(unit: u16) ?u32 {
+    if (unit >= 0xD800 and unit <= 0xDBFF) {
+        // High surrogate — store and wait for the low surrogate
+        g_high_surrogate = unit;
+        return null;
+    }
+
+    if (unit >= 0xDC00 and unit <= 0xDFFF) {
+        // Low surrogate — combine with stored high surrogate
+        if (g_high_surrogate == 0) return null; // orphaned low surrogate
+        const codepoint = (@as(u32, g_high_surrogate) - 0xD800) * 0x400 +
+            (@as(u32, unit) - 0xDC00) + 0x10000;
+        g_high_surrogate = 0;
+        return codepoint;
+    }
+
+    g_high_surrogate = 0;
+    return unit;
+}
+
+/// Drain the WM_CHAR messages already queued for the WM_KEYDOWN currently
+/// being dispatched, returning the last complete codepoint (surrogate pairs
+/// combined) or null if none. This relies on the message pump ordering:
+/// TranslateMessage runs before DispatchMessageW, so by the time windowProc
+/// sees a keydown, that keydown's WM_CHAR(s) are already posted — and posted
+/// messages are retrieved ahead of hardware input, so the peeked chars can
+/// only belong to this keydown.
+fn peekCharForKeydown(hwnd: HWND) ?u32 {
+    var result: ?u32 = null;
+    var m: wam.MSG = undefined;
+    while (wam.PeekMessageW(&m, hwnd, wam.WM_CHAR, wam.WM_CHAR, wam.PM_REMOVE) != 0) {
+        const unit: u16 = @intCast(m.wParam & 0xFFFF);
+        if (combineSurrogate(unit)) |cp| {
+            result = cp;
+        }
+    }
+    return result;
+}
+
 /// Derive the unshifted character for a virtual key code using MapVirtualKeyW.
 /// Returns 0 for non-printable keys. Dead-key bit is masked off.
 fn unshiftedCodepoint(vk_wparam: WPARAM) u32 {
@@ -554,7 +601,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
         wam.WM_KEYDOWN, WM_SYSKEYDOWN => {
             const surface = g_surface orelse return wam.DefWindowProcW(hwnd, msg, wParam, lParam);
             const keycode = extractScancode(lParam);
-            const mods = translateMods();
+            var mods = translateMods();
             const action: ghostty.ghostty_input_action_e = if ((@as(u64, @bitCast(lParam)) >> 30) & 1 != 0)
                 ghostty.GHOSTTY_ACTION_REPEAT
             else
@@ -566,11 +613,48 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // handling.
             const unshifted_codepoint = unshiftedCodepoint(wParam);
 
-            // When ctrl is held, Windows never sends WM_CHAR, so we must
-            // synthesize the text here. Without text, the legacy encoder's
-            // CSIu path (for ctrl+shift+letter) silently drops the event.
+            // Prefer the layout-produced text from the WM_CHARs that
+            // TranslateMessage already queued for this keydown. Without text
+            // at press time, the kitty encoder consumes the press (from
+            // unshifted_codepoint alone) and the WM_CHAR retry never fires,
+            // dropping shifted symbols like shift+1 → "!".
+            //
+            // Ctrl combinations produce either control-char WM_CHARs
+            // (filtered below) or none at all, so we fall through and
+            // synthesize printable text. Without text, the legacy encoder
+            // drops ctrl+shift+letter events entirely.
             const has_ctrl = (keyState(.CONTROL) & 0x8000) != 0;
+            var consumed_mods: ghostty.ghostty_input_mods_e = ghostty.GHOSTTY_MODS_NONE;
             const text: ?[*]const u8 = txt: {
+                if (peekCharForKeydown(hwnd)) |peeked| {
+                    if (peeked >= 0x20 and peeked != 0x7f) {
+                        const cp: u21 = std.math.cast(u21, peeked) orelse break :txt null;
+                        const len = std.unicode.utf8Encode(cp, &g_key_text_buf) catch break :txt null;
+                        if (len < g_key_text_buf.len) {
+                            g_key_text_buf[len] = 0;
+                        }
+                        // Shift/caps were consumed by the OS translation
+                        // only if they actually changed the produced char
+                        // (shift+1 → "!"). If it equals the unshifted
+                        // codepoint (shift+space → " "), claiming
+                        // consumption would strip the modifier and ghostty
+                        // would send plain text instead of a CSI sequence.
+                        if (peeked != unshifted_codepoint) {
+                            consumed_mods = mods & (ghostty.GHOSTTY_MODS_SHIFT | ghostty.GHOSTTY_MODS_CAPS);
+                        }
+                        // Windows reports AltGr as ctrl+alt. Since the key
+                        // produced printable text, strip both so the raw
+                        // ctrl doesn't suppress the encoders' text paths.
+                        const has_alt = (keyState(.MENU) & 0x8000) != 0;
+                        if (has_ctrl and has_alt) {
+                            mods &= ~@as(ghostty.ghostty_input_mods_e, ghostty.GHOSTTY_MODS_CTRL | ghostty.GHOSTTY_MODS_ALT);
+                        }
+                        break :txt &g_key_text_buf;
+                    }
+                    // Control chars (e.g. ctrl+A's 0x01) are removed from
+                    // the queue and intentionally dropped — the press
+                    // itself encodes them.
+                }
                 if (!has_ctrl) break :txt null;
                 if (unshifted_codepoint < 0x20) break :txt null;
                 var cp: u21 = std.math.cast(u21, unshifted_codepoint) orelse break :txt null;
@@ -588,7 +672,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             const key_event: ghostty.ghostty_input_key_s = .{
                 .action = action,
                 .mods = mods,
-                .consumed_mods = ghostty.GHOSTTY_MODS_NONE,
+                .consumed_mods = consumed_mods,
                 .keycode = keycode,
                 .text = text,
                 .unshifted_codepoint = unshifted_codepoint,
@@ -625,25 +709,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             const surface = g_surface orelse return wam.DefWindowProcW(hwnd, msg, wParam, lParam);
 
             const char_code: u16 = @intCast(wParam & 0xFFFF);
-
-            // Handle UTF-16 surrogate pairs: codepoints above U+FFFF are
-            // delivered as two WM_CHAR messages (high surrogate, then low).
-            if (char_code >= 0xD800 and char_code <= 0xDBFF) {
-                // High surrogate — store and wait for the low surrogate
-                g_high_surrogate = char_code;
-                return 0;
-            }
-
-            var codepoint: u32 = char_code;
-            if (char_code >= 0xDC00 and char_code <= 0xDFFF) {
-                // Low surrogate — combine with stored high surrogate
-                if (g_high_surrogate == 0) return 0; // orphaned low surrogate
-                codepoint = (@as(u32, g_high_surrogate) - 0xD800) * 0x400 +
-                    (@as(u32, char_code) - 0xDC00) + 0x10000;
-                g_high_surrogate = 0;
-            } else {
-                g_high_surrogate = 0;
-            }
+            const codepoint = combineSurrogate(char_code) orelse return 0;
 
             var key_event = g_pending_key_event orelse return 0;
             g_pending_key_event = null;
@@ -655,7 +721,8 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             }
 
             key_event.text = &g_pending_text_buf;
-            key_event.unshifted_codepoint = codepoint;
+            // Keep the press-time unshifted_codepoint: overwriting it with
+            // the (shifted) WM_CHAR char would corrupt kitty/CSIu key codes.
             _ = ghostty.ghostty_surface_key(surface, key_event);
             return 0;
         },
