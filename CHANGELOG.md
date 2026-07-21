@@ -5,6 +5,9 @@
 ### Runtime
 
 - [macos] Add a minimal application menu with a standard About panel and Quit
+- [windows, linux] Fix shifted symbols typing the unshifted character (e.g. shift+1 producing "1" instead of "!") in apps using the kitty keyboard protocol
+- [windows, linux] Fix composed input (dead keys, Compose, input methods) reporting wrong key codes to kitty-protocol apps, and no longer drop the keystroke when its text can't be encoded
+- [windows, linux] Fix modified space chords: ctrl/alt+space were dropped entirely and shift+space lost its modifier in apps using the kitty keyboard protocol
 
 ## 0.7.0
 
