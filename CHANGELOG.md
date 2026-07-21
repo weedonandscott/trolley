@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Runtime
+
+- [macos] Add a minimal application menu with a standard About panel and Quit
+
 ## 0.7.0
 
 ### Runtime

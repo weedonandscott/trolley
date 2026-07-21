@@ -442,6 +442,41 @@ class TrolleyView: NSView, NSTextInputClient {
 }
 
 // ---------------------------------------------------------------------------
+// Application menu
+// ---------------------------------------------------------------------------
+// Build a minimal application menu so the packaged app has the expected macOS
+// menu bar: an app menu with the standard "About <App>" panel and Quit. The app
+// name is read from the bundle's Info.plist (CFBundleDisplayName / CFBundleName)
+// so it matches the packaged product name, falling back to plain labels for
+// unbundled `trolley run` invocations. The About item uses AppKit's standard
+// panel, which reads the name/version/icon straight from the Info.plist.
+func buildMainMenu() -> NSMenu {
+    let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
+        ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String)
+
+    let mainMenu = NSMenu()
+
+    let appMenuItem = NSMenuItem()
+    mainMenu.addItem(appMenuItem)
+
+    let appMenu = NSMenu()
+    appMenu.addItem(
+        withTitle: appName.map { "About \($0)" } ?? "About",
+        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+        keyEquivalent: ""
+    )
+    appMenu.addItem(.separator())
+    appMenu.addItem(
+        withTitle: appName.map { "Quit \($0)" } ?? "Quit",
+        action: #selector(NSApplication.terminate(_:)),
+        keyEquivalent: "q"
+    )
+    appMenuItem.submenu = appMenu
+
+    return mainMenu
+}
+
+// ---------------------------------------------------------------------------
 // AppDelegate
 // ---------------------------------------------------------------------------
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -561,6 +596,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ghostty_surface_set_size(surface, UInt32(backed.width), UInt32(backed.height))
         ghostty_surface_set_content_scale(surface, Double(window.backingScaleFactor), Double(window.backingScaleFactor))
         ghostty_surface_set_focus(surface, true)
+
+        // -- Install the application menu --
+        NSApp.mainMenu = buildMainMenu()
 
         // -- Show window --
         window.makeKeyAndOrderFront(nil)
