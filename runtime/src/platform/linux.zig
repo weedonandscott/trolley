@@ -176,23 +176,34 @@ fn closeSurfaceCallback(_: ?*anyopaque, _: bool) callconv(.c) void {
 // ---------------------------------------------------------------------------
 // GLFW input callbacks → ghostty
 //
-// Key input runs one of two protocols:
+// Key input delivers text along one of three paths:
 //
-// Deferral (primary): keyCallback withholds printable press/repeat events
-// with no ctrl/alt/super; charCallback — invoked by GLFW synchronously
-// right after, in the same OS event — attaches the layout-produced text
-// plus consumed_mods and sends once. This also carries most composition:
-// dead-key/Compose output is delivered inside the finishing keystroke's
-// own event, completing that key's deferral. A deferred press whose char
-// never arrives (e.g. the dead-key press itself) is sent textless — and
-// marked composing, so the encoders suppress it — by flushDeferred at the
-// next keyCallback or after glfwWaitEvents, then parked for the retry.
+// Deferral-attach (plain typing): keyCallback withholds printable
+// press/repeat events with no ctrl/alt/super; charCallback — invoked by
+// GLFW synchronously right after, in the same OS event — attaches the
+// layout-produced text plus consumed_mods and sends once. A deferred
+// press whose char never arrives (dead key, Compose middle key, an
+// IM-filtered press) is sent textless — and marked composing, so the
+// encoders suppress it — by flushDeferred at the next keyCallback or
+// after glfwWaitEvents, then parked. Under g_sync_compose (no external
+// IM, chars synchronous) a flush that lands while already composing is
+// instead delivered non-composing as the compose terminator (repeats of
+// the composing key excepted).
 //
-// Send-then-retry (fallback): everything else is sent immediately (ctrl
+// Standalone commit (composing text, sync or async): a char arriving
+// while composing — a dead-key finish, or an ibus/fcitx commit delivered
+// in a later batch — is sent as a fabricated keycode-less press carrying
+// only the text, and the suppressed press it finishes is swallowed. This
+// is ghostty GTK's imCommit contract: committed text rides a key event
+// only for plain typing, never for a composition commit, so no keycode
+// can ever be misattributed. Remaining codepoints of a multi-codepoint
+// commit (CJK) follow via g_commit_burst. The swallowed press's release
+// still encodes under kitty report_events — GTK has the same asymmetry.
+//
+// Retry-attach (fallback): everything else is sent immediately (ctrl
 // combos with synthesized text, other keys textless). If ghostty reports
-// the event not consumed, it is parked; a charCallback with no deferred
-// press (async IM commits delivered outside the keystroke's own event)
-// re-sends the parked event with that text.
+// the event not consumed, it is parked; a non-composing charCallback with
+// no deferred press re-sends the parked event with that text.
 // ---------------------------------------------------------------------------
 var g_pending_key_event: ?ghostty.ghostty_input_key_s = null;
 var g_pending_text_buf: [5]u8 = undefined;
@@ -208,7 +219,76 @@ var g_deferred_key_event: ?ghostty.ghostty_input_key_s = null;
 /// printable press (dead key, Compose middle key, IM preedit). Composing
 /// events are suppressed by the encoders — kitty passes only plain
 /// modifiers, legacy drops everything — matching the GTK preedit contract.
+/// g_composing_keycode records the keycode of the flush that set it.
 var g_composing: bool = false;
+
+/// True after a composition commit was delivered standalone; admits the
+/// remaining codepoints of a multi-codepoint commit (CJK) to the same
+/// path. Cleared on the next key press/repeat and on focus loss.
+var g_commit_burst: bool = false;
+/// Dedicated buffer (not g_pending_text_buf) so a burst send can never
+/// clobber text belonging to a still-parked event.
+var g_commit_text_buf: [5]u8 = undefined;
+
+/// True when GLFW's compose pipeline is synchronous — native Wayland
+/// (GLFW has no IM integration there; chars come from in-process
+/// xkb-compose) or X11 with no external XIM configured. Under this gate
+/// a deferred press whose char never arrived in its batch will NEVER
+/// receive one later, so a flush-while-already-composing is a compose
+/// terminator, not an in-flight IM keystroke. Under an external IM
+/// (XMODIFIERS=@im=fcitx etc.) chars are async and every printable
+/// flushes textless — the same condition would fire on fast typing and
+/// double-deliver once the async char lands, so the gate MUST stay off.
+/// Computed once after glfwInit, before loadBundledEnvironment mutates
+/// the environment libX11 read.
+var g_sync_compose: bool = false;
+
+/// Keycode of the press whose flush most recently set g_composing;
+/// lets a held dead key's repeats (same keycode, REPEAT action) stay
+/// suppressed instead of leaking through the terminator rule.
+var g_composing_keycode: u32 = 0;
+
+/// Dedicated buffer for terminator-synthesized text (mirrors the
+/// g_commit_text_buf precedent: never alias a buffer a parked event
+/// might still point at).
+var g_terminator_text_buf: [5]u8 = undefined;
+
+/// XIM discovery mirror: libX11 reaches an external server only via
+/// XMODIFIERS "@im=<name>"; empty, "none" and "local" mean the built-in
+/// input method. Returns false on non-X11 platforms.
+fn detectExternalXim() bool {
+    if (glfw.glfwGetPlatform() != glfw.GLFW_PLATFORM_X11) return false;
+    const xmods = std.posix.getenv("XMODIFIERS") orelse return false;
+    const idx = std.mem.indexOf(u8, xmods, "@im=") orelse return false;
+    const rest = xmods[idx + "@im=".len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '@') orelse rest.len;
+    const name = rest[0..end];
+    if (name.len == 0) return false;
+    if (std.mem.eql(u8, name, "none")) return false;
+    if (std.mem.eql(u8, name, "local")) return false;
+    return true;
+}
+
+/// Deliver committed IM text standalone, mirroring ghostty GTK's imCommit
+/// composing/out-of-keyevent path: a press with an unmapped keycode
+/// (-> .unidentified), no mods, no unshifted codepoint, composing=false.
+/// Both encoders emit the utf8 raw (key_encode.zig kitty fallback /
+/// legacy tail), in every kitty flag combination.
+fn sendCommitText(codepoint: c_uint) void {
+    const surface = g_surface orelse return;
+    const cp: u21 = std.math.cast(u21, codepoint) orelse return;
+    const len = std.unicode.utf8Encode(cp, &g_commit_text_buf) catch return;
+    if (len < g_commit_text_buf.len) g_commit_text_buf[len] = 0;
+    _ = ghostty.ghostty_surface_key(surface, .{
+        .action = ghostty.GHOSTTY_ACTION_PRESS,
+        .mods = ghostty.GHOSTTY_MODS_NONE,
+        .consumed_mods = ghostty.GHOSTTY_MODS_NONE,
+        .keycode = 0, // matches no real key -> input.Key.unidentified
+        .text = &g_commit_text_buf,
+        .unshifted_codepoint = 0,
+        .composing = false,
+    });
+}
 
 /// Send a deferred press whose charCallback never fired. The deferral
 /// predicate admits only printable, modifier-free presses, so a missing
@@ -217,15 +297,85 @@ var g_composing: bool = false;
 /// composing=true. The event is parked unconditionally for the retry
 /// path: async IMs (ibus/fcitx over X11) deliver the commit char in a
 /// later batch, and a suppressed composing event's consumed result says
-/// nothing about whether that retry will be needed.
+/// nothing about whether that retry will be needed. Exception: under
+/// g_sync_compose a flush while already composing takes the terminator
+/// branch — delivered with text, not parked.
 fn flushDeferred() void {
     var key_event = g_deferred_key_event orelse return;
     g_deferred_key_event = null;
     const surface = g_surface orelse return;
+
+    // Sync-compose terminator (g_sync_compose): a textless flush while
+    // ALREADY composing means GLFW's compose layer swallowed this key's
+    // char — a cancelled sequence's terminating key. Its char will never
+    // arrive (chars are synchronous under the gate), so suppressing it
+    // as composing would eat the keystroke outright; deliver it
+    // non-composing with its own codepoint instead (restores master's
+    // bare-q; the swallowed accent is unrecoverable, GLFW discards it).
+    // Accepted cost: middle keys of 3+-key Compose sequences leak.
+    if (g_sync_compose and g_composing) {
+        // Held-dead-key repeats re-flush textless while composing but
+        // terminate nothing: same keycode that started the composition,
+        // REPEAT action. Keep today's suppression for those.
+        if (key_event.action == ghostty.GHOSTTY_ACTION_REPEAT and
+            key_event.keycode == g_composing_keycode)
+        {
+            key_event.composing = true;
+            _ = ghostty.ghostty_surface_key(surface, key_event);
+            g_pending_key_event = key_event;
+            return;
+        }
+
+        g_composing = false;
+        key_event.composing = false;
+        // Synthesize the key's own text (same shape as the ctrl-combo
+        // synthesis in keyCallback); on encode failure send textless —
+        // kitty still CSIu-encodes it from unshifted_codepoint (the
+        // master behavior this branch restores).
+        text: {
+            var cp: u21 = std.math.cast(u21, key_event.unshifted_codepoint) orelse break :text;
+            const shifted = (key_event.mods & ghostty.GHOSTTY_MODS_SHIFT) != 0;
+            if (shifted and cp >= 'a' and cp <= 'z') cp = cp - 'a' + 'A';
+            const len = std.unicode.utf8Encode(cp, &g_terminator_text_buf) catch break :text;
+            if (len < g_terminator_text_buf.len) g_terminator_text_buf[len] = 0;
+            key_event.text = &g_terminator_text_buf;
+            if (cp != key_event.unshifted_codepoint) {
+                key_event.consumed_mods = key_event.mods &
+                    (ghostty.GHOSTTY_MODS_SHIFT | ghostty.GHOSTTY_MODS_CAPS);
+            }
+        }
+        _ = ghostty.ghostty_surface_key(surface, key_event);
+        // Deliberately NOT parked: it was delivered with text; parking
+        // would let a stray char double-deliver it via rule 3.
+        return;
+    }
+
     g_composing = true;
+    g_composing_keycode = key_event.keycode;
     key_event.composing = true;
     _ = ghostty.ghostty_surface_key(surface, key_event);
     g_pending_key_event = key_event;
+}
+
+/// A bare modifier keysym (shift/ctrl/alt/super/caps). Its press reaches
+/// the immediate path but is transparent to composition: pressing Shift
+/// to type a capital while a dead key is pending must not cancel the
+/// pending compose (unlike Enter/Escape/a letter, which legitimately
+/// terminate it). Used to gate the composing-clear at the immediate path.
+fn isModifierKey(glfw_key: c_int) bool {
+    return switch (glfw_key) {
+        glfw.GLFW_KEY_LEFT_SHIFT,
+        glfw.GLFW_KEY_RIGHT_SHIFT,
+        glfw.GLFW_KEY_LEFT_CONTROL,
+        glfw.GLFW_KEY_RIGHT_CONTROL,
+        glfw.GLFW_KEY_LEFT_ALT,
+        glfw.GLFW_KEY_RIGHT_ALT,
+        glfw.GLFW_KEY_LEFT_SUPER,
+        glfw.GLFW_KEY_RIGHT_SUPER,
+        glfw.GLFW_KEY_CAPS_LOCK,
+        => true,
+        else => false,
+    };
 }
 
 fn keyCallback(
@@ -310,11 +460,13 @@ fn keyCallback(
         .composing = if (action == ghostty.GHOSTTY_ACTION_RELEASE) g_composing else false,
     };
 
-    // Clear any previous pending event — press/repeat only: a release
-    // (most commonly the flushed key's own) must not destroy a parked
-    // retry before an async IM commit arrives.
+    // Clear any previous pending event and commit burst — press/repeat
+    // only: a release (most commonly the flushed key's own) must not
+    // destroy a parked retry, and raw releases can interleave the chars
+    // of a multi-codepoint commit burst.
     if (action != ghostty.GHOSTTY_ACTION_RELEASE) {
         g_pending_key_event = null;
+        g_commit_burst = false;
     }
 
     // Defer printable, modifier-free presses until charCallback supplies
@@ -330,10 +482,22 @@ fn keyCallback(
         return;
     }
 
-    // Keys reaching the immediate path either resolve or are unaffected by
-    // composition; a stuck false positive must never eat Enter or Escape,
-    // so the flag's blast radius is one flushed press plus one release.
-    g_composing = false;
+    // Press/repeat only: keys reaching the immediate path either resolve
+    // or are unaffected by composition, so a press/repeat retires the
+    // composing flag — a stuck false positive still can't eat Enter or
+    // Escape. Releases must NOT clear it: after a flushed dead key or
+    // IM finisher, the async commit chars race the finisher's own
+    // release over the input-method round-trip, and a release-time
+    // clear would drop the commit at charCallback rule 5. It would also
+    // let a dead key's own release (arriving between the flush and the
+    // finishing char) demote the finish from the standalone rule-1 send
+    // to a keycode-attached rule-2 send. Bare modifier presses are also
+    // exempt: pressing Shift to reach a capital while a dead key is
+    // pending (e.g. `'` then Shift+Q) must keep the composition alive so
+    // the terminator can deliver Q — clearing here would strand the
+    // still-deferred letter on the suppressing normal path.
+    if (action != ghostty.GHOSTTY_ACTION_RELEASE and !isModifierKey(glfw_key))
+        g_composing = false;
 
     const consumed = ghostty.ghostty_surface_key(surface, key_event);
 
@@ -349,13 +513,26 @@ fn keyCallback(
 fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
     const surface = g_surface orelse return;
 
-    // Complete a press deferred by keyCallback in this same OS event: the
-    // codepoint here is the layout-produced text for that press.
+    // Rule 1 — composition commit. A char arriving while composing is the
+    // commit of the suppressed press (sync dead-key finish, or async
+    // ibus/fcitx commit from a later batch). GTK contract: deliver it
+    // standalone, never attached to a keycode; the finishing press (open
+    // deferral) is swallowed like GTK swallows it (keyEvent early return),
+    // and the parked suppressed press is retired — its commit has landed.
+    if (g_composing) {
+        g_composing = false;
+        g_deferred_key_event = null;
+        g_pending_key_event = null;
+        g_commit_burst = true;
+        sendCommitText(codepoint);
+        return;
+    }
+
+    // Rule 2 — plain typing: complete a press deferred by keyCallback in
+    // this same OS event; the codepoint here is the layout-produced text
+    // for that press.
     if (g_deferred_key_event) |deferred| {
         g_deferred_key_event = null;
-        // A synchronous char is the commit (or a plain keystroke): any
-        // pending composition just resolved.
-        g_composing = false;
         var key_event = deferred;
 
         // If the codepoint can't be encoded, send the press textless: the
@@ -386,33 +563,42 @@ fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
         return;
     }
 
-    // charCallback only matters if we have a pending (ignored) key event.
-    var key_event = g_pending_key_event orelse return;
-    g_pending_key_event = null;
+    // Rule 3 — non-composing retry: a parked immediate-path press (e.g.
+    // super+letter sent textless and not consumed) gets its synchronous
+    // char attached. (Not alt/ctrl+letter: GLFW's `plain` gating skips
+    // charCallback entirely when ctrl or alt is held.)
+    if (g_pending_key_event) |pending| {
+        g_pending_key_event = null;
+        var key_event = pending;
 
-    // The parked event was sent as a suppressed composing press; this late
-    // char is the commit (async ibus/fcitx delivers it in a batch after the
-    // keystroke's own). Re-send as a normal press so the text isn't
-    // suppressed in turn.
-    g_composing = false;
-    key_event.composing = false;
+        // Encode the codepoint as UTF-8 into our persistent buffer.
+        const cp: u21 = std.math.cast(u21, codepoint) orelse return;
+        const len = std.unicode.utf8Encode(cp, &g_pending_text_buf) catch return;
 
-    // Encode the codepoint as UTF-8 into our persistent buffer.
-    const cp: u21 = std.math.cast(u21, codepoint) orelse return;
-    const len = std.unicode.utf8Encode(cp, &g_pending_text_buf) catch return;
+        // Null-terminate for the C API (ghostty expects a C string).
+        if (len < g_pending_text_buf.len) {
+            g_pending_text_buf[len] = 0;
+        }
 
-    // Null-terminate for the C API (ghostty expects a C string).
-    if (len < g_pending_text_buf.len) {
-        g_pending_text_buf[len] = 0;
+        // Update the key event with the real text. Keep the press-time
+        // unshifted_codepoint: overwriting it with the produced char would
+        // corrupt kitty/CSIu key codes.
+        key_event.text = &g_pending_text_buf;
+
+        // Re-send the key event to ghostty with the text populated.
+        _ = ghostty.ghostty_surface_key(surface, key_event);
+        return;
     }
 
-    // Update the key event with the real text. Keep the press-time
-    // unshifted_codepoint: overwriting it with the produced char would
-    // corrupt kitty/CSIu key codes.
-    key_event.text = &g_pending_text_buf;
+    // Rule 4 — remainder of a multi-codepoint commit, or text injected
+    // with no keystroke at all since the commit began.
+    if (g_commit_burst) {
+        sendCommitText(codepoint);
+        return;
+    }
 
-    // Re-send the key event to ghostty with the text populated.
-    _ = ghostty.ghostty_surface_key(surface, key_event);
+    // Rule 5 — no context (e.g. char whose press was consumed as a
+    // keybind): drop.
 }
 
 fn mouseButtonCallback(
@@ -459,8 +645,19 @@ fn framebufferSizeCallback(_: ?*glfw.GLFWwindow, width: c_int, height: c_int) ca
 }
 
 fn focusCallback(_: ?*glfw.GLFWwindow, focused: c_int) callconv(.c) void {
-    // Focus loss invalidates any in-flight composition.
-    if (focused != glfw.GLFW_TRUE) g_composing = false;
+    // Focus loss invalidates any in-flight composition: a commit arriving
+    // after refocus must not attach to a pre-blur press, and a stale burst
+    // must not leak text past it. The open deferral is left alone — it
+    // belongs to a keystroke in the current batch and the main-loop
+    // flushDeferred handles it. Note that flush can then re-park the
+    // pre-blur press and re-set g_composing after this clear; the
+    // no-stale-attach guarantee still holds because composing routes any
+    // late char to the standalone-commit rule, never the parked retry.
+    if (focused != glfw.GLFW_TRUE) {
+        g_composing = false;
+        g_pending_key_event = null;
+        g_commit_burst = false;
+    }
     const surface = g_surface orelse return;
     ghostty.ghostty_surface_set_focus(surface, focused == glfw.GLFW_TRUE);
 }
@@ -521,6 +718,11 @@ pub fn main() !void {
         return error.GlfwInitFailed;
     }
     defer glfw.glfwTerminate();
+
+    // After glfwInit (platform decided; the XIM connection, if any, is
+    // made from the current environment) and before loadBundledEnvironment
+    // below can mutate that environment.
+    g_sync_compose = !detectExternalXim();
 
     // Request OpenGL 4.3 core profile (ghostty minimum)
     glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MAJOR, 4);
