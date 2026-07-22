@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0
+
 ### Runtime
 
 - [macos] Add IME and dead-key support: preedit (marked text) now renders at the cursor and the candidate window is positioned correctly; committed text is delivered whether finished by keyboard or clicked with the mouse
