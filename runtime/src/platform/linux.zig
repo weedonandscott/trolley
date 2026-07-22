@@ -184,8 +184,9 @@ fn closeSurfaceCallback(_: ?*anyopaque, _: bool) callconv(.c) void {
 // plus consumed_mods and sends once. This also carries most composition:
 // dead-key/Compose output is delivered inside the finishing keystroke's
 // own event, completing that key's deferral. A deferred press whose char
-// never arrives (e.g. the dead-key press itself) is sent textless by
-// flushDeferred at the next keyCallback or after glfwWaitEvents.
+// never arrives (e.g. the dead-key press itself) is sent textless — and
+// marked composing, so the encoders suppress it — by flushDeferred at the
+// next keyCallback or after glfwWaitEvents, then parked for the retry.
 //
 // Send-then-retry (fallback): everything else is sent immediately (ctrl
 // combos with synthesized text, other keys textless). If ghostty reports
@@ -203,18 +204,28 @@ var g_key_text_buf: [5]u8 = undefined;
 /// (or flushed) before the next key event.
 var g_deferred_key_event: ?ghostty.ghostty_input_key_s = null;
 
-/// Send a deferred press whose charCallback never fired (dead keys,
-/// XIM-filtered presses). A not-consumed event is parked for the retry
-/// path; note the keyCallback-entry call site clears that parking slot
-/// shortly after, so the retry is only reachable from the main-loop flush.
+/// True while the input pipeline holds composition state for a swallowed
+/// printable press (dead key, Compose middle key, IM preedit). Composing
+/// events are suppressed by the encoders — kitty passes only plain
+/// modifiers, legacy drops everything — matching the GTK preedit contract.
+var g_composing: bool = false;
+
+/// Send a deferred press whose charCallback never fired. The deferral
+/// predicate admits only printable, modifier-free presses, so a missing
+/// char means the input pipeline swallowed it: dead key, Compose middle
+/// key, or an IM-filtered press — all composition, all suppressed via
+/// composing=true. The event is parked unconditionally for the retry
+/// path: async IMs (ibus/fcitx over X11) deliver the commit char in a
+/// later batch, and a suppressed composing event's consumed result says
+/// nothing about whether that retry will be needed.
 fn flushDeferred() void {
-    const key_event = g_deferred_key_event orelse return;
+    var key_event = g_deferred_key_event orelse return;
     g_deferred_key_event = null;
     const surface = g_surface orelse return;
-    const consumed = ghostty.ghostty_surface_key(surface, key_event);
-    if (!consumed) {
-        g_pending_key_event = key_event;
-    }
+    g_composing = true;
+    key_event.composing = true;
+    _ = ghostty.ghostty_surface_key(surface, key_event);
+    g_pending_key_event = key_event;
 }
 
 fn keyCallback(
@@ -292,11 +303,19 @@ fn keyCallback(
         .keycode = keycode,
         .text = text,
         .unshifted_codepoint = unshifted_codepoint,
-        .composing = false,
+        // A release built right after flushDeferred marked a composition
+        // (most commonly the flushed key's own release) is suppressed with
+        // it. Presses always start out non-composing here: the deferral or
+        // flushDeferred decides otherwise.
+        .composing = if (action == ghostty.GHOSTTY_ACTION_RELEASE) g_composing else false,
     };
 
-    // Clear any previous pending event.
-    g_pending_key_event = null;
+    // Clear any previous pending event — press/repeat only: a release
+    // (most commonly the flushed key's own) must not destroy a parked
+    // retry before an async IM commit arrives.
+    if (action != ghostty.GHOSTTY_ACTION_RELEASE) {
+        g_pending_key_event = null;
+    }
 
     // Defer printable, modifier-free presses until charCallback supplies
     // the layout text. Sending them textless would let the kitty encoder
@@ -310,6 +329,11 @@ fn keyCallback(
         g_deferred_key_event = key_event;
         return;
     }
+
+    // Keys reaching the immediate path either resolve or are unaffected by
+    // composition; a stuck false positive must never eat Enter or Escape,
+    // so the flag's blast radius is one flushed press plus one release.
+    g_composing = false;
 
     const consumed = ghostty.ghostty_surface_key(surface, key_event);
 
@@ -329,6 +353,9 @@ fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
     // codepoint here is the layout-produced text for that press.
     if (g_deferred_key_event) |deferred| {
         g_deferred_key_event = null;
+        // A synchronous char is the commit (or a plain keystroke): any
+        // pending composition just resolved.
+        g_composing = false;
         var key_event = deferred;
 
         // If the codepoint can't be encoded, send the press textless: the
@@ -362,6 +389,13 @@ fn charCallback(_: ?*glfw.GLFWwindow, codepoint: c_uint) callconv(.c) void {
     // charCallback only matters if we have a pending (ignored) key event.
     var key_event = g_pending_key_event orelse return;
     g_pending_key_event = null;
+
+    // The parked event was sent as a suppressed composing press; this late
+    // char is the commit (async ibus/fcitx delivers it in a batch after the
+    // keystroke's own). Re-send as a normal press so the text isn't
+    // suppressed in turn.
+    g_composing = false;
+    key_event.composing = false;
 
     // Encode the codepoint as UTF-8 into our persistent buffer.
     const cp: u21 = std.math.cast(u21, codepoint) orelse return;
@@ -425,6 +459,8 @@ fn framebufferSizeCallback(_: ?*glfw.GLFWwindow, width: c_int, height: c_int) ca
 }
 
 fn focusCallback(_: ?*glfw.GLFWwindow, focused: c_int) callconv(.c) void {
+    // Focus loss invalidates any in-flight composition.
+    if (focused != glfw.GLFW_TRUE) g_composing = false;
     const surface = g_surface orelse return;
     ghostty.ghostty_surface_set_focus(surface, focused == glfw.GLFW_TRUE);
 }

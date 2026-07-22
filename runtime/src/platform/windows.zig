@@ -507,6 +507,12 @@ var g_pending_text_buf: [5]u8 = undefined;
 var g_key_text_buf: [5]u8 = undefined;
 var g_high_surrogate: u16 = 0;
 
+/// True while the kernel holds a pending dead-key accent (WM_DEADCHAR seen,
+/// commit char not yet produced). Composing events are suppressed by the
+/// encoders — kitty passes only plain modifiers, legacy drops everything —
+/// matching the GTK/AppKit preedit contract.
+var g_composing: bool = false;
+
 // ---------------------------------------------------------------------------
 // Win32 modifier translation
 // ---------------------------------------------------------------------------
@@ -583,6 +589,26 @@ fn peekCharForKeydown(hwnd: HWND) ?u32 {
     return result;
 }
 
+/// Drain the WM_DEADCHAR/WM_SYSDEADCHAR messages queued for the WM_KEYDOWN
+/// currently being dispatched, returning whether any were found. The same
+/// pump-ordering argument as peekCharForKeydown applies. TranslateMessage
+/// posts a deadchar instead of a char when the keystroke starts a dead-key
+/// composition: the kernel holds the pending accent and resolves it on a
+/// later keystroke. The accent codepoints are deliberately not decoded and
+/// not routed through combineSurrogate (which would clobber the shared
+/// g_high_surrogate) — only the fact that a composition started matters.
+fn peekDeadCharForKeydown(hwnd: HWND) bool {
+    var dead = false;
+    var m: wam.MSG = undefined;
+    while (wam.PeekMessageW(&m, hwnd, wam.WM_DEADCHAR, wam.WM_DEADCHAR, wam.PM_REMOVE) != 0) {
+        dead = true;
+    }
+    while (wam.PeekMessageW(&m, hwnd, wam.WM_SYSDEADCHAR, wam.WM_SYSDEADCHAR, wam.PM_REMOVE) != 0) {
+        dead = true;
+    }
+    return dead;
+}
+
 /// Derive the unshifted character for a virtual key code using MapVirtualKeyW.
 /// Returns 0 for non-printable keys. Dead-key bit is masked off.
 fn unshiftedCodepoint(vk_wparam: WPARAM) u32 {
@@ -623,10 +649,36 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // (filtered below) or none at all, so we fall through and
             // synthesize printable text. Without text, the legacy encoder
             // drops ctrl+shift+letter events entirely.
+            // Drain this keydown's translation output up front. A deadchar
+            // means the keystroke started a composition (dead press, or a
+            // second dead key restarting one — if a char arrived alongside,
+            // the deadchar wins): the kernel now holds the accent, so the
+            // event must be marked composing or the encoders leak a
+            // spurious keystroke. A char resolves any pending composition:
+            // printable is the commit (text attached below); a control char
+            // (e.g. Escape's 0x1B flushing kernel dead state) is the
+            // clears-preedit-without-committing case, so the canceling
+            // keystroke itself is suppressed. No output at all (arrows,
+            // modifiers, ctrl combos) leaves kernel dead-key state — and
+            // g_composing — untouched.
+            const peeked_char = peekCharForKeydown(hwnd);
+            const was_composing = g_composing;
+            const composing = cmp: {
+                if (peekDeadCharForKeydown(hwnd)) {
+                    g_composing = true;
+                    break :cmp true;
+                }
+                if (peeked_char) |peeked| {
+                    g_composing = false;
+                    break :cmp was_composing and (peeked < 0x20 or peeked == 0x7f);
+                }
+                break :cmp g_composing;
+            };
+
             const has_ctrl = (keyState(.CONTROL) & 0x8000) != 0;
             var consumed_mods: ghostty.ghostty_input_mods_e = ghostty.GHOSTTY_MODS_NONE;
             const text: ?[*]const u8 = txt: {
-                if (peekCharForKeydown(hwnd)) |peeked| {
+                if (peeked_char) |peeked| {
                     if (peeked >= 0x20 and peeked != 0x7f) {
                         const cp: u21 = std.math.cast(u21, peeked) orelse break :txt null;
                         const len = std.unicode.utf8Encode(cp, &g_key_text_buf) catch break :txt null;
@@ -676,7 +728,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
                 .keycode = keycode,
                 .text = text,
                 .unshifted_codepoint = unshifted_codepoint,
-                .composing = false,
+                .composing = composing,
             };
 
             g_pending_key_event = null;
@@ -699,7 +751,9 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
                 .keycode = keycode,
                 .text = null,
                 .unshifted_codepoint = unshifted_codepoint,
-                .composing = false,
+                // The dead key's own release lands mid-composition and is
+                // suppressed like its press.
+                .composing = g_composing,
             };
 
             _ = ghostty.ghostty_surface_key(surface, key_event);
@@ -721,6 +775,9 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             }
 
             key_event.text = &g_pending_text_buf;
+            // An arriving char is a commit: a parked composing press (async
+            // IME) must not be suppressed now that it carries the text.
+            key_event.composing = false;
             // Keep the press-time unshifted_codepoint: overwriting it with
             // the (shifted) WM_CHAR char would corrupt kitty/CSIu key codes.
             _ = ghostty.ghostty_surface_key(surface, key_event);
@@ -793,6 +850,8 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             return 0;
         },
         wam.WM_KILLFOCUS => {
+            // Focus loss invalidates any in-flight dead-key composition.
+            g_composing = false;
             if (g_surface) |surface| {
                 ghostty.ghostty_surface_set_focus(surface, false);
             }
