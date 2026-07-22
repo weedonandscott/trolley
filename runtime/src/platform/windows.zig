@@ -504,7 +504,7 @@ fn closeClipboard() void {
 // ---------------------------------------------------------------------------
 var g_pending_key_event: ?ghostty.ghostty_input_key_s = null;
 var g_pending_text_buf: [5]u8 = undefined;
-var g_key_text_buf: [5]u8 = undefined;
+var g_key_text_buf: [128]u8 = undefined;
 var g_high_surrogate: u16 = 0;
 
 /// True while the kernel holds a pending dead-key accent (WM_DEADCHAR seen,
@@ -570,23 +570,64 @@ fn combineSurrogate(unit: u16) ?u32 {
     return unit;
 }
 
+const CharBurst = struct {
+    /// Complete codepoints drained from the queue (printable or control).
+    seen: usize = 0,
+    /// Bytes of printable UTF-8 accumulated in g_key_text_buf
+    /// (NUL-terminated at [len]); 0 when the burst had no printables.
+    len: usize = 0,
+    /// Last printable codepoint appended. In a flushed-dead-key burst
+    /// ("´q") earlier codepoints are the flushed accent(s); the last one
+    /// is the char produced by this keystroke's own translation. Stale
+    /// (the accent) when trailing_control is set — but then the text is
+    /// never attached, so it goes unread.
+    last_printable: u32 = 0,
+    /// True when the burst's final complete codepoint was a control
+    /// char: the keystroke's own translation was a control (Enter's
+    /// 0x0D, Backspace's 0x08 flushing a dead-key accent), so any
+    /// accumulated printables are a flushed accent that must not ride
+    /// this event — the encoders' enter/backspace text carve-outs
+    /// would replace the key's function with the accent text.
+    trailing_control: bool = false,
+};
+
 /// Drain the WM_CHAR messages already queued for the WM_KEYDOWN currently
-/// being dispatched, returning the last complete codepoint (surrogate pairs
-/// combined) or null if none. This relies on the message pump ordering:
+/// being dispatched, accumulating the printable codepoints (surrogate pairs
+/// combined) as UTF-8 in g_key_text_buf. A keystroke can queue more than
+/// one: a failed dead-key composition flushes the pending accent alongside
+/// the key's own char. This relies on the message pump ordering:
 /// TranslateMessage runs before DispatchMessageW, so by the time windowProc
 /// sees a keydown, that keydown's WM_CHAR(s) are already posted — and posted
 /// messages are retrieved ahead of hardware input, so the peeked chars can
 /// only belong to this keydown.
-fn peekCharForKeydown(hwnd: HWND) ?u32 {
-    var result: ?u32 = null;
+fn peekCharForKeydown(hwnd: HWND) CharBurst {
+    var burst: CharBurst = .{};
     var m: wam.MSG = undefined;
     while (wam.PeekMessageW(&m, hwnd, wam.WM_CHAR, wam.WM_CHAR, wam.PM_REMOVE) != 0) {
         const unit: u16 = @intCast(m.wParam & 0xFFFF);
-        if (combineSurrogate(unit)) |cp| {
-            result = cp;
+        const cp32 = combineSurrogate(unit) orelse continue;
+        burst.seen += 1;
+        // Control chars (ctrl+A's 0x01, Escape's 0x1B flushing dead
+        // state) are drained but never appended: the press itself
+        // encodes them, and a single control codepoint would force the
+        // kitty encoder off its plain-text path for the whole string.
+        // A control in final position additionally marks the burst so
+        // earlier printables don't ride the event (see trailing_control).
+        if (cp32 < 0x20 or cp32 == 0x7f) {
+            burst.trailing_control = true;
+            continue;
         }
+        const cp: u21 = std.math.cast(u21, cp32) orelse continue;
+        // Reserve one byte for the NUL terminator; drop codepoints that
+        // no longer fit (whole codepoints only — never partial UTF-8).
+        if (burst.len + 4 >= g_key_text_buf.len) continue;
+        const n = std.unicode.utf8Encode(cp, g_key_text_buf[burst.len..]) catch continue;
+        burst.len += n;
+        burst.last_printable = cp32;
+        burst.trailing_control = false;
     }
-    return result;
+    if (burst.len > 0) g_key_text_buf[burst.len] = 0;
+    return burst;
 }
 
 /// Drain the WM_DEADCHAR/WM_SYSDEADCHAR messages queued for the WM_KEYDOWN
@@ -607,6 +648,25 @@ fn peekDeadCharForKeydown(hwnd: HWND) bool {
         dead = true;
     }
     return dead;
+}
+
+/// Deliver already-encoded UTF-8 standalone, mirroring ghostty GTK's
+/// imCommit composing path (and linux.zig's sendCommitText): a press
+/// with keycode 0 (-> input.Key.unidentified), no mods, no unshifted
+/// codepoint, composing=false. Both encoders emit the utf8 raw in every
+/// kitty flag combination. Mods are deliberately NOT translateMods():
+/// an AltGr-committed accent must not carry ctrl+alt, which would push
+/// the kitty encoder off its plain-text path.
+fn sendStandaloneText(surface: ghostty.ghostty_surface_t, text: [*]const u8) void {
+    _ = ghostty.ghostty_surface_key(surface, .{
+        .action = ghostty.GHOSTTY_ACTION_PRESS,
+        .mods = ghostty.GHOSTTY_MODS_NONE,
+        .consumed_mods = ghostty.GHOSTTY_MODS_NONE,
+        .keycode = 0,
+        .text = text,
+        .unshifted_codepoint = 0,
+        .composing = false,
+    });
 }
 
 /// Derive the unshifted character for a virtual key code using MapVirtualKeyW.
@@ -646,7 +706,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // dropping shifted symbols like shift+1 → "!".
             //
             // Ctrl combinations produce either control-char WM_CHARs
-            // (filtered below) or none at all, so we fall through and
+            // (dropped by the peek) or none at all, so we fall through and
             // synthesize printable text. Without text, the legacy encoder
             // drops ctrl+shift+letter events entirely.
             // Drain this keydown's translation output up front. A deadchar
@@ -654,58 +714,72 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // second dead key restarting one — if a char arrived alongside,
             // the deadchar wins): the kernel now holds the accent, so the
             // event must be marked composing or the encoders leak a
-            // spurious keystroke. A char resolves any pending composition:
-            // printable is the commit (text attached below); a control char
-            // (e.g. Escape's 0x1B flushing kernel dead state) is the
-            // clears-preedit-without-committing case, so the canceling
-            // keystroke itself is suppressed. No output at all (arrows,
-            // modifiers, ctrl combos) leaves kernel dead-key state — and
-            // g_composing — untouched.
-            const peeked_char = peekCharForKeydown(hwnd);
+            // spurious keystroke; printables drained alongside the deadchar
+            // are the *previous* composition's commit and are delivered
+            // standalone before the suppressed press. Chars resolve any
+            // pending composition:
+            // a burst ending in a printable is the commit (text attached
+            // below — several codepoints when a failed composition flushes
+            // the accent alongside this key's own char, "´q"); a burst
+            // ending in a control char attaches no text — Enter/Backspace
+            // flushing an accent ("´" then 0x0D) must encode as the key
+            // itself, accent dropped, not have the accent hijack the
+            // encoders' enter/backspace text carve-outs — and when it had
+            // no printables at all (e.g. Escape's 0x1B flushing kernel
+            // dead state) it is the clears-preedit-without-committing
+            // case, so the canceling keystroke itself is suppressed. No
+            // output at all (arrows, modifiers, most ctrl combos) leaves
+            // kernel dead-key state — and g_composing — untouched.
+            const burst = peekCharForKeydown(hwnd);
+            const dead = peekDeadCharForKeydown(hwnd);
             const was_composing = g_composing;
             const composing = cmp: {
-                if (peekDeadCharForKeydown(hwnd)) {
+                if (dead) {
                     g_composing = true;
                     break :cmp true;
                 }
-                if (peeked_char) |peeked| {
+                if (burst.seen > 0) {
                     g_composing = false;
-                    break :cmp was_composing and (peeked < 0x20 or peeked == 0x7f);
+                    break :cmp was_composing and burst.len == 0;
                 }
                 break :cmp g_composing;
             };
 
+            // Dead-then-dead: this keystroke both committed the pending
+            // accent (its WM_CHAR drained into the burst) and started a new
+            // composition (WM_DEADCHAR). Deadchar-wins suppresses the press
+            // below, so the committed printables are delivered first as a
+            // standalone send — composition commits never ride a keycode
+            // (GTK imCommit contract). trailing_control bursts keep today's
+            // never-attach rule.
+            if (dead and burst.len > 0 and !burst.trailing_control) {
+                sendStandaloneText(surface, &g_key_text_buf);
+            }
+
             const has_ctrl = (keyState(.CONTROL) & 0x8000) != 0;
             var consumed_mods: ghostty.ghostty_input_mods_e = ghostty.GHOSTTY_MODS_NONE;
             const text: ?[*]const u8 = txt: {
-                if (peeked_char) |peeked| {
-                    if (peeked >= 0x20 and peeked != 0x7f) {
-                        const cp: u21 = std.math.cast(u21, peeked) orelse break :txt null;
-                        const len = std.unicode.utf8Encode(cp, &g_key_text_buf) catch break :txt null;
-                        if (len < g_key_text_buf.len) {
-                            g_key_text_buf[len] = 0;
-                        }
-                        // Shift/caps were consumed by the OS translation
-                        // only if they actually changed the produced char
-                        // (shift+1 → "!"). If it equals the unshifted
-                        // codepoint (shift+space → " "), claiming
-                        // consumption would strip the modifier and ghostty
-                        // would send plain text instead of a CSI sequence.
-                        if (peeked != unshifted_codepoint) {
-                            consumed_mods = mods & (ghostty.GHOSTTY_MODS_SHIFT | ghostty.GHOSTTY_MODS_CAPS);
-                        }
-                        // Windows reports AltGr as ctrl+alt. Since the key
-                        // produced printable text, strip both so the raw
-                        // ctrl doesn't suppress the encoders' text paths.
-                        const has_alt = (keyState(.MENU) & 0x8000) != 0;
-                        if (has_ctrl and has_alt) {
-                            mods &= ~@as(ghostty.ghostty_input_mods_e, ghostty.GHOSTTY_MODS_CTRL | ghostty.GHOSTTY_MODS_ALT);
-                        }
-                        break :txt &g_key_text_buf;
+                if (burst.len > 0 and !burst.trailing_control and !dead) {
+                    // Shift/caps were consumed by the OS translation only
+                    // if they actually changed the produced char (shift+1
+                    // → "!"). Compare the burst's last codepoint: in a
+                    // flushed burst the leading ones are the previous
+                    // keystroke's accent; only the last is this key's own
+                    // translation. If it equals the unshifted codepoint
+                    // (shift+space → " "), claiming consumption would
+                    // strip the modifier and ghostty would send plain text
+                    // instead of a CSI sequence.
+                    if (burst.last_printable != unshifted_codepoint) {
+                        consumed_mods = mods & (ghostty.GHOSTTY_MODS_SHIFT | ghostty.GHOSTTY_MODS_CAPS);
                     }
-                    // Control chars (e.g. ctrl+A's 0x01) are removed from
-                    // the queue and intentionally dropped — the press
-                    // itself encodes them.
+                    // Windows reports AltGr as ctrl+alt. Since the key
+                    // produced printable text, strip both so the raw
+                    // ctrl doesn't suppress the encoders' text paths.
+                    const has_alt = (keyState(.MENU) & 0x8000) != 0;
+                    if (has_ctrl and has_alt) {
+                        mods &= ~@as(ghostty.ghostty_input_mods_e, ghostty.GHOSTTY_MODS_CTRL | ghostty.GHOSTTY_MODS_ALT);
+                    }
+                    break :txt &g_key_text_buf;
                 }
                 if (!has_ctrl) break :txt null;
                 if (unshifted_codepoint < 0x20) break :txt null;
