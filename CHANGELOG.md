@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Runtime
+
+- [macos] Add IME and dead-key support: preedit (marked text) now renders at the cursor and the candidate window is positioned correctly; committed text is delivered whether finished by keyboard or clicked with the mouse
+- [macos] Fix focus tracking so switching away with Cmd+Tab reports focus loss (previously only first-responder changes did)
+- [macos] Fix releasing one of two held modifiers (e.g. one of two Shifts) reporting a press, leaving the modifier stuck for kitty-protocol apps
+- [macos] Fix ctrl+shift+letter encoding nothing, and arrow/function keys typing raw private-use bytes into kitty-protocol apps
+- [windows] Fix dead-key sequences: the pending accent is now held during composition and committed on the finishing key, including dead-then-dead (e.g. two accents) and accents flushed by Enter/Backspace/Escape
+- [linux] Deliver input-method commits from async IMEs (ibus, fcitx over X11) that arrive after the keystroke, including multi-codepoint (CJK) commits
+- [linux] Fix a cancelled Compose/dead-key sequence swallowing its terminating key on setups with no external input method
+
 ## 0.8.0
 
 ### Runtime

@@ -27,6 +27,48 @@ func ghosttyMods(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
     return ghostty_input_mods_e(mods)
 }
 
+extension NSEvent {
+    /// The text to attach to a key event for ghostty.
+    ///
+    /// Filters what raw `characters` reports for two cases ghostty handles
+    /// itself in its key encoder:
+    ///   - A single control character (ctrl+letter etc.): re-derive the
+    ///     printable char by dropping ctrl from the translation, so the
+    ///     legacy encoder's ctrlSeq/CSIu paths get text to work with.
+    ///     Without this, ctrl+shift+letter encodes nothing at all — the
+    ///     same bug class the linux/windows backends synthesize text for.
+    ///   - A single private-use-area codepoint (arrows, F-keys, Home/End/
+    ///     Delete/PageUp/PageDown report U+F700-F8FF): return nil, or the
+    ///     kitty encoder's plain-text fast path types the raw PUA bytes
+    ///     into kitty-protocol apps instead of encoding a CSI sequence.
+    ///
+    /// Only valid on key events (.keyDown/.keyUp): `characters` traps on
+    /// other event types.
+    var ghosttyCharacters: String? {
+        // If we have no characters associated with this event we do nothing.
+        guard let characters else { return nil }
+
+        if characters.count == 1,
+           let scalar = characters.unicodeScalars.first {
+            // If we have a single control character, then we return the
+            // characters without control pressed. We do this because we
+            // handle control character encoding directly within ghostty's
+            // key encoder.
+            if scalar.value < 0x20 {
+                return self.characters(byApplyingModifiers: modifierFlags.subtracting(.control))
+            }
+
+            // If we have a single value in the PUA, then it's a function
+            // key and we don't want to send PUA ranges down to ghostty.
+            if scalar.value >= 0xF700 && scalar.value <= 0xF8FF {
+                return nil
+            }
+        }
+
+        return characters
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ghostty runtime callbacks
 // ---------------------------------------------------------------------------
@@ -216,8 +258,35 @@ class TrolleyView: NSView, NSTextInputClient {
     override var wantsUpdateLayer: Bool { true }
 
     // Two-phase key input state
-    private var pendingKeyEvent: ghostty_input_key_s?
     private var keyTextAccumulator: [String]?
+
+    // Marked (preedit) text from the input method. Non-empty means we're
+    // mid-composition: dead-key accent or IME preedit. Composing events are
+    // suppressed by the encoders — kitty passes only plain modifiers, legacy
+    // drops everything — matching the GTK/Win32 preedit contract.
+    private var markedText = NSMutableAttributedString()
+
+    // Whether we last told libghostty we're focused. Fed by two sources —
+    // window key state and first-responder state — last writer wins; the
+    // cache dedupes them so set_focus is only sent on transitions. That's
+    // sound only while this view is the window's sole, permanent first
+    // responder; a second responder would need a real AND of both states.
+    private var focused: Bool = false
+
+    private func focusDidChange(_ focused: Bool) {
+        guard let surface = gSurface else { return }
+        guard self.focused != focused else { return }
+        self.focused = focused
+
+        if !focused {
+            // Focus loss invalidates any in-flight composition, and the
+            // input context is told so the IME's own state doesn't go stale.
+            inputContext?.discardMarkedText()
+            unmarkText()
+        }
+
+        ghostty_surface_set_focus(surface, focused)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -249,19 +318,41 @@ class TrolleyView: NSView, NSTextInputClient {
     // MARK: - Focus
 
     override func becomeFirstResponder() -> Bool {
-        gSurface.map { ghostty_surface_set_focus($0, true) }
+        focusDidChange(true)
         return true
     }
 
     override func resignFirstResponder() -> Bool {
-        gSurface.map { ghostty_surface_set_focus($0, false) }
+        focusDidChange(false)
         return true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        // Cmd+tab / app activation changes window key state without touching
+        // first responder, so the responder hooks alone never report focus
+        // loss on app switch. Observe our window's key transitions directly.
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+        center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        guard let window else { return }
+        center.addObserver(
+            self, selector: #selector(windowKeyStateDidChange(_:)),
+            name: NSWindow.didBecomeKeyNotification, object: window)
+        center.addObserver(
+            self, selector: #selector(windowKeyStateDidChange(_:)),
+            name: NSWindow.didResignKeyNotification, object: window)
+    }
+
+    @objc private func windowKeyStateDidChange(_ notification: Notification) {
+        focusDidChange(window?.isKeyWindow ?? false)
     }
 
     // MARK: - Keyboard input
 
     override func keyDown(with event: NSEvent) {
-        guard let surface = gSurface else { return }
+        guard gSurface != nil else { return }
         let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
 
         // Two-phase input: first send raw key, then use interpretKeyEvents
@@ -269,19 +360,35 @@ class TrolleyView: NSView, NSTextInputClient {
         keyTextAccumulator = []
         defer { keyTextAccumulator = nil }
 
+        // Whether marked text existed before this event tells us if the event
+        // cleared a composition without committing (e.g. Escape canceling a
+        // dead key) — that keystroke must be suppressed too.
+        let markedTextBefore = markedText.length > 0
+
         interpretKeyEvents([event])
 
+        // Mirror the (possibly changed) marked text to ghostty's preedit so
+        // the pending accent/preedit renders at the cursor.
+        syncPreedit(clearIfNeeded: markedTextBefore)
+
         if let texts = keyTextAccumulator, !texts.isEmpty {
+            // Committed text is never composing — it's the result of one.
             for text in texts {
                 sendKey(action, event: event, text: text)
             }
         } else {
-            sendKey(action, event: event, text: event.characters)
+            sendKey(
+                action, event: event, text: event.ghosttyCharacters,
+                composing: markedText.length > 0 || markedTextBefore
+            )
         }
     }
 
     override func keyUp(with event: NSEvent) {
-        sendKey(GHOSTTY_ACTION_RELEASE, event: event, text: nil)
+        // The dead key's own release lands mid-composition and is
+        // suppressed like its press.
+        sendKey(GHOSTTY_ACTION_RELEASE, event: event, text: nil,
+                composing: markedText.length > 0)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -296,14 +403,46 @@ class TrolleyView: NSView, NSTextInputClient {
         }
 
         let mods = ghosttyMods(event.modifierFlags)
-        let action = (mods.rawValue & mod != 0) ? GHOSTTY_ACTION_PRESS : GHOSTTY_ACTION_RELEASE
+
+        // If the modifier is still active it's a press — unless the event's
+        // own side of the modifier is no longer down, in which case this is
+        // the release of one side while the other side keeps the flag set.
+        // Without this, releasing one of two held shifts sends a PRESS for
+        // the released key and it appears stuck to report-events consumers.
+        var action = GHOSTTY_ACTION_RELEASE
+        if mods.rawValue & mod != 0 {
+            let sidePressed: Bool
+            switch event.keyCode {
+            case 0x38:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICELSHIFTKEYMASK) != 0
+            case 0x3C:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICERSHIFTKEYMASK) != 0
+            case 0x3B:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICELCTLKEYMASK) != 0
+            case 0x3E:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICERCTLKEYMASK) != 0
+            case 0x3A:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICELALTKEYMASK) != 0
+            case 0x3D:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICERALTKEYMASK) != 0
+            case 0x37:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICELCMDKEYMASK) != 0
+            case 0x36:
+                sidePressed = event.modifierFlags.rawValue & UInt(NX_DEVICERCMDKEYMASK) != 0
+            default:
+                sidePressed = true
+            }
+            if sidePressed { action = GHOSTTY_ACTION_PRESS }
+        }
+
         sendKey(action, event: event, text: nil)
     }
 
     private func sendKey(
         _ action: ghostty_input_action_e,
         event: NSEvent,
-        text: String?
+        text: String?,
+        composing: Bool = false
     ) {
         guard let surface = gSurface else { return }
 
@@ -314,7 +453,7 @@ class TrolleyView: NSView, NSTextInputClient {
         key_ev.consumed_mods = ghosttyMods(
             event.modifierFlags.subtracting([.control, .command])
         )
-        key_ev.composing = false
+        key_ev.composing = composing
         key_ev.text = nil
         key_ev.unshifted_codepoint = 0
 
@@ -347,18 +486,74 @@ class TrolleyView: NSView, NSTextInputClient {
         default: return
         }
 
-        keyTextAccumulator?.append(chars)
+        // If insertText is called, our preedit is over.
+        unmarkText()
+
+        // Inside a keyDown the text is accumulated and sent with the key
+        // event; outside one (e.g. IME candidate clicked with the mouse,
+        // Character Viewer) there is no key event to attach it to.
+        if keyTextAccumulator != nil {
+            keyTextAccumulator?.append(chars)
+            return
+        }
+
+        guard let surface = gSurface else { return }
+        chars.withCString { ptr in
+            ghostty_surface_text(surface, ptr, UInt(chars.utf8.count))
+        }
     }
 
-    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {}
-    func unmarkText() {}
-    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
-    func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
-    func hasMarkedText() -> Bool { false }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        switch string {
+        case let v as NSAttributedString: markedText = NSMutableAttributedString(attributedString: v)
+        case let v as String: markedText = NSMutableAttributedString(string: v)
+        default: return
+        }
+
+        // Outside a keyDown (e.g. keyboard layout switched mid-composition)
+        // nobody else will sync the preedit, so do it here.
+        if keyTextAccumulator == nil { syncPreedit() }
+    }
+
+    func unmarkText() {
+        guard markedText.length > 0 else { return }
+        markedText.mutableString.setString("")
+        syncPreedit()
+    }
+
+    func selectedRange() -> NSRange { NSRange() }
+    func markedRange() -> NSRange { markedText.length > 0 ? NSRange(0...(markedText.length - 1)) : NSRange() }
+    func hasMarkedText() -> Bool { markedText.length > 0 }
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
-    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect { .zero }
+
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard let surface = gSurface, let window = self.window else { return .zero }
+
+        // Ghostty tells us where the IME candidate window should render,
+        // in top-left-origin view points; AppKit wants bottom-left screen coords.
+        var x: Double = 0, y: Double = 0, width: Double = 0, height: Double = 0
+        ghostty_surface_ime_point(surface, &x, &y, &width, &height)
+
+        let viewRect = NSRect(x: x, y: frame.size.height - y, width: width, height: height)
+        return window.convertToScreen(convert(viewRect, to: nil))
+    }
+
     func characterIndex(for point: NSPoint) -> Int { 0 }
+
+    /// Mirror markedText to libghostty's preedit so the pending
+    /// accent/preedit renders at the cursor.
+    private func syncPreedit(clearIfNeeded: Bool = true) {
+        guard let surface = gSurface else { return }
+        if markedText.length > 0 {
+            let str = markedText.string
+            str.withCString { ptr in
+                ghostty_surface_preedit(surface, ptr, UInt(str.utf8.count))
+            }
+        } else if clearIfNeeded {
+            ghostty_surface_preedit(surface, nil, 0)
+        }
+    }
 
     override func doCommand(by selector: Selector) {
         // Prevents NSBeep for unhandled key equivalents
