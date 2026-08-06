@@ -88,12 +88,12 @@
               --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath (with pkgs; [
                 libGL
                 libxkbcommon
-                xorg.libX11
-                xorg.libXcursor
-                xorg.libXext
-                xorg.libXi
-                xorg.libXinerama
-                xorg.libXrandr
+                libx11
+                libxcursor
+                libxext
+                libxi
+                libxinerama
+                libxrandr
                 wayland
               ])}"
           '';
@@ -158,12 +158,12 @@
             export LD_LIBRARY_PATH="${lib.makeLibraryPath (with pkgs; [
               libGL
               libxkbcommon
-              xorg.libX11
-              xorg.libXcursor
-              xorg.libXext
-              xorg.libXi
-              xorg.libXinerama
-              xorg.libXrandr
+              libx11
+              libxcursor
+              libxext
+              libxi
+              libxinerama
+              libxrandr
               wayland
             ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           '' + (if pkgs.stdenv.hostPlatform.isx86_64 then ''
