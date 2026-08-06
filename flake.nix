@@ -3,13 +3,25 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # nixpkgs ≥ 26.11 throws for x86_64-darwin (support dropped), so that
+    # system resolves everything against the maintained 26.05 darwin branch.
+    # zig/zon2nix are duplicated because `follows` can't vary per system.
+    nixpkgs-x86_64-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     zig = {
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    zig-x86_64-darwin = {
+      url = "github:mitchellh/zig-overlay";
+      inputs.nixpkgs.follows = "nixpkgs-x86_64-darwin";
+    };
     zon2nix = {
       url = "github:jcollie/zon2nix?rev=c28e93f3ba133d4c1b1d65224e2eebede61fd071";
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+    zon2nix-x86_64-darwin = {
+      url = "github:jcollie/zon2nix?rev=c28e93f3ba133d4c1b1d65224e2eebede61fd071";
+      inputs.nixpkgs.follows = "nixpkgs-x86_64-darwin";
     };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -17,19 +29,22 @@
     };
   };
 
-  outputs = { self, nixpkgs, zig, zon2nix, rust-overlay }:
+  outputs = { self, nixpkgs, nixpkgs-x86_64-darwin, zig, zig-x86_64-darwin, zon2nix, zon2nix-x86_64-darwin, rust-overlay }:
     let
       lib = nixpkgs.lib;
       supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forEachSupportedSystem = f: lib.genAttrs supportedSystems (system: f rec {
-        pkgs = import nixpkgs {
-          inherit system;
-          config.allowUnfree = true;
-          overlays = [ rust-overlay.overlays.default ];
-        };
-        zigPkg = zig.packages.${system}."0.15.2";
-        zon2nixPkg = zon2nix.packages.${system}.zon2nix;
-      });
+      forEachSupportedSystem = f: lib.genAttrs supportedSystems (system:
+        let
+          intelMac = system == "x86_64-darwin";
+        in f rec {
+          pkgs = import (if intelMac then nixpkgs-x86_64-darwin else nixpkgs) {
+            inherit system;
+            config.allowUnfree = true;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          zigPkg = (if intelMac then zig-x86_64-darwin else zig).packages.${system}."0.15.2";
+          zon2nixPkg = (if intelMac then zon2nix-x86_64-darwin else zon2nix).packages.${system}.zon2nix;
+        });
     in
     {
       packages = forEachSupportedSystem ({ pkgs, zigPkg, ... }: {
@@ -61,11 +76,10 @@
           env.TROLLEY_RUNTIME_SOURCE = "https://github.com/weedonandscott/trolley/releases/download/v{version}/trolley-runtime-{target}.tar.xz";
           nativeBuildInputs = [ pkgs.pkg-config ]
             ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.makeWrapper ];
-          buildInputs = [ pkgs.xz ]
-            ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            ];
+          # No Darwin framework inputs needed: the Darwin stdenv ships the
+          # Apple SDK (Security, SystemConfiguration, ...) since the
+          # darwin.apple_sdk compatibility layer was removed from nixpkgs.
+          buildInputs = [ pkgs.xz ];
           # The runtime binary is self-contained (only needs libc) but GLFW
           # loads X11/Wayland/GL at runtime via dlopen.  On NixOS these live
           # in the Nix store, so wrap the CLI with LD_LIBRARY_PATH.
@@ -74,12 +88,12 @@
               --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath (with pkgs; [
                 libGL
                 libxkbcommon
-                xorg.libX11
-                xorg.libXcursor
-                xorg.libXext
-                xorg.libXi
-                xorg.libXinerama
-                xorg.libXrandr
+                libx11
+                libxcursor
+                libxext
+                libxi
+                libxinerama
+                libxrandr
                 wayland
               ])}"
           '';
@@ -144,12 +158,12 @@
             export LD_LIBRARY_PATH="${lib.makeLibraryPath (with pkgs; [
               libGL
               libxkbcommon
-              xorg.libX11
-              xorg.libXcursor
-              xorg.libXext
-              xorg.libXi
-              xorg.libXinerama
-              xorg.libXrandr
+              libx11
+              libxcursor
+              libxext
+              libxi
+              libxinerama
+              libxrandr
               wayland
             ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           '' + (if pkgs.stdenv.hostPlatform.isx86_64 then ''
