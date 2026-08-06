@@ -61,11 +61,10 @@
           env.TROLLEY_RUNTIME_SOURCE = "https://github.com/weedonandscott/trolley/releases/download/v{version}/trolley-runtime-{target}.tar.xz";
           nativeBuildInputs = [ pkgs.pkg-config ]
             ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.makeWrapper ];
-          buildInputs = [ pkgs.xz ]
-            ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            ];
+          # No Darwin framework inputs needed: the Darwin stdenv ships the
+          # Apple SDK (Security, SystemConfiguration, ...) since the
+          # darwin.apple_sdk compatibility layer was removed from nixpkgs.
+          buildInputs = [ pkgs.xz ];
           # The runtime binary is self-contained (only needs libc) but GLFW
           # loads X11/Wayland/GL at runtime via dlopen.  On NixOS these live
           # in the Nix store, so wrap the CLI with LD_LIBRARY_PATH.
