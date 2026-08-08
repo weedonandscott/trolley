@@ -576,9 +576,9 @@ impl Config {
             errors.push(format!("[app] identifier: {e}"));
         }
 
-        // app.display_name must be non-empty
-        if self.app.display_name.trim().is_empty() {
-            errors.push("[app] display_name must not be empty".into());
+        // app.display_name flows into artifact filenames; it must be filename-safe
+        if let Err(e) = validate_display_name(&self.app.display_name) {
+            errors.push(format!("[app] display_name: {e}"));
         }
 
         // app.slug must be valid
@@ -969,6 +969,40 @@ fn validate_slug(slug: &str) -> std::result::Result<(), String> {
         return Err(format!(
             "\"{slug}\" must contain only lowercase ASCII alphanumeric characters and hyphens"
         ));
+    }
+    Ok(())
+}
+
+/// Validate that a display name is safe to compose into artifact filenames.
+///
+/// Rules:
+/// - Non-empty and not whitespace-only
+/// - No leading/trailing whitespace
+/// - No path separators (`/`, `\`) — these would redirect the artifact rename
+/// - No characters invalid in Windows filenames (`:`, `*`, `?`, `"`, `<`, `>`, `|`)
+/// - No control characters
+fn validate_display_name(name: &str) -> std::result::Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("must not be empty".into());
+    }
+    if name != name.trim() {
+        return Err(format!(
+            "\"{name}\" must not have leading or trailing whitespace"
+        ));
+    }
+    if name.contains(['/', '\\']) {
+        return Err(format!(
+            "\"{name}\" must not contain path separators ('/' or '\\')"
+        ));
+    }
+    if name.contains([':', '*', '?', '"', '<', '>', '|']) {
+        return Err(format!(
+            "\"{name}\" must not contain characters invalid in Windows filenames \
+             (':', '*', '?', '\"', '<', '>', '|')"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(format!("\"{name}\" must not contain control characters"));
     }
     Ok(())
 }
@@ -1548,10 +1582,63 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
 
     #[test]
     fn validate_empty_display_name() {
+        for name in ["", "  "] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name: must not be empty"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_accepts_multi_word_names() {
+        for name in ["Project Sanity", "Hello World"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            assert!(m.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_path_separators() {
+        for name in ["a/b", "a\\b"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("path separators"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_windows_reserved_characters() {
+        for name in ["Foo: Bar", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("invalid in Windows filenames"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_control_characters() {
         let mut m = minimal_manifest();
-        m.app.display_name = "  ".into();
+        m.app.display_name = "a\tb".into();
         let err = m.validate().unwrap_err().to_string();
-        assert!(err.contains("display_name must not be empty"));
+        assert!(err.contains("[app] display_name"));
+        assert!(err.contains("control characters"));
+    }
+
+    #[test]
+    fn validate_display_name_rejects_surrounding_whitespace() {
+        for name in [" x", "x "] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("leading or trailing whitespace"));
+        }
     }
 
     #[test]

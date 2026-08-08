@@ -144,6 +144,11 @@ The manifest file `trolley.toml` has the following sections:
 | `version`      | Version string                             |
 | `icons`        | List of icon paths/globs ([see Icons](#icons)) |
 
+`display_name` flows is used for packages filenames, so it must be safe:
+non-empty, no leading/trailing whitespace, no path separators (`/`, `\`),
+no control characters, and no characters invalid in Windows filenames
+(`:`, `*`, `?`, `"`, `<`, `>`, `|`).
+
 ### `[linux]`, `[macos]`, `[windows]` -- at least one required
 
 ```toml

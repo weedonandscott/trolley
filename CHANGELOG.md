@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CLI
+
+- [all] **BREAKING:** Validate `display_name` at config load: reject path separators, control characters, and Windows-reserved filename characters
+
 ## 0.9.0
 
 ### Runtime
