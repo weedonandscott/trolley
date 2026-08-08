@@ -1,8 +1,9 @@
 [app]
 identifier = "com.example.hello"
-display_name = "Hello"
+display_name = "Hello World"
 slug = "hello"
 version = "0.1.0"
+icons = ["icon.png"]
 
 [linux]
 binaries = { x86_64 = "zig-out/bin/hello" }

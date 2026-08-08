@@ -4,6 +4,7 @@
 
 ### CLI
 
+<<<<<<< HEAD
 - [all] **BREAKING:** derive package filenames from the trolley config.
         Previously decided by `cargo-packager` (which carried the internal
         `_runtime` suffix on Windows). Installers use the display name (`My_App_1.2.3_x86_64-setup.exe`),
@@ -18,6 +19,9 @@
         of the project directory (RPM icons were silently dropped when packaging
         from elsewhere), and escape glob metacharacters in the project path
         (e.g. a directory named `app [beta]`)
+- [all] CI: releases are now gated on the test suite, and per-target sanity runs
+        diff the packaged `dist/` listing against committed snapshots (`tests/sanity/listings/`)
+        and verify icons are embedded in Linux packages
 
 ## 0.9.0
 
