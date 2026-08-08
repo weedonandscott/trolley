@@ -5,6 +5,7 @@
 ### CLI
 
 - [all] **BREAKING:** Validate `display_name` at config load: reject path separators, control characters, and Windows-reserved filename characters
+- [all] Fix icon globs resolving against the process working directory instead of the project directory (RPM icons were silently dropped when packaging from elsewhere), and escape glob metacharacters in the project path (e.g. a directory named `app [beta]`)
 
 ## 0.9.0
 

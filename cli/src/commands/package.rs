@@ -208,7 +208,7 @@ pub fn run(
     // Build packages unless bundle-only
     if !bundle_only && !formats.is_empty() {
         println!();
-        super::formats::build_formats(&formats, &bundle_dir, &dist_dir, &ctx.config, &manifest, skip_failed_formats)?;
+        super::formats::build_formats(&formats, &ctx.project_dir, &bundle_dir, &dist_dir, &ctx.config, &manifest, skip_failed_formats)?;
     }
 
     Ok(bundle_dir)

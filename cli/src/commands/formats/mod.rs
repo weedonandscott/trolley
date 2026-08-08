@@ -28,6 +28,7 @@ fn spinner(msg: &str) -> ProgressBar {
 /// Build all requested formats from the assembled bundle directory.
 pub fn build_formats(
     formats: &[Format],
+    project_dir: &Path,
     bundle_dir: &Path,
     dist_dir: &Path,
     config: &Config,
@@ -46,43 +47,43 @@ pub fn build_formats(
             }
             Format::Rpm => {
                 let pb = spinner("Building RPM...");
-                let r = rpm::build(bundle_dir, dist_dir, config, manifest);
+                let r = rpm::build(project_dir, bundle_dir, dist_dir, config, manifest);
                 pb.finish_and_clear();
                 ("RPM", r)
             }
             Format::Deb => {
                 let pb = spinner("Building deb...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Deb]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Deb]);
                 pb.finish_and_clear();
                 ("deb", r)
             }
             Format::AppImage => {
                 let pb = spinner("Building AppImage...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::AppImage]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::AppImage]);
                 pb.finish_and_clear();
                 ("AppImage", r)
             }
             Format::Pacman => {
                 let pb = spinner("Building pacman...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Pacman]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Pacman]);
                 pb.finish_and_clear();
                 ("pacman", r)
             }
             Format::Nsis => {
                 let pb = spinner("Building NSIS...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Nsis]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Nsis]);
                 pb.finish_and_clear();
                 ("NSIS", r)
             }
             Format::MacApp => {
                 let pb = spinner("Building app...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::MacApp]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::MacApp]);
                 pb.finish_and_clear();
                 ("app", r)
             }
             Format::Dmg => {
                 let pb = spinner("Building dmg...");
-                let r = packager_common::run_packager(config, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Dmg]);
+                let r = packager_common::run_packager(config, project_dir, bundle_dir, dist_dir, manifest, &[packager_common::PackagerFormat::Dmg]);
                 pb.finish_and_clear();
                 ("dmg", r)
             }

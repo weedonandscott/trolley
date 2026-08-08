@@ -5,7 +5,7 @@ use cargo_packager::PackageFormat;
 use cargo_packager::config::{Binary, Config as PackagerConfig, Resource};
 use trolley_config::Config;
 
-use super::super::common::{BundleManifest, BundleVariant};
+use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
 
 /// Formats handled by cargo-packager. Every variant maps 1:1 to a PackageFormat.
 pub enum PackagerFormat {
@@ -42,6 +42,7 @@ impl PackagerFormat {
 /// TUI core, configs, and fonts are resources placed next to it in `$INSTDIR`.
 fn build_packager_config(
     config: &Config,
+    project_dir: &Path,
     bundle_dir: &Path,
     dist_dir: &Path,
     manifest: &BundleManifest,
@@ -106,10 +107,21 @@ fn build_packager_config(
     packager_config.target_triple = Some(manifest.target.target_triple().to_string());
     packager_config.description = Some(config.app.display_name.clone());
     packager_config.resources = Some(resource_files);
+    // Icon patterns are project-relative in trolley.toml (same semantics as
+    // resolve_windows_icon); cargo-packager globs them relative to the CWD,
+    // so anchor them to the project dir first, escaping glob metacharacters
+    // in the directory prefix.
     packager_config.icons = if config.app.icons.is_empty() {
         None
     } else {
-        Some(config.app.icons.clone())
+        Some(
+            config
+                .app
+                .icons
+                .iter()
+                .map(|pattern| anchored_glob_pattern(project_dir, pattern))
+                .collect(),
+        )
     };
 
     if let BundleVariant::Linux { .. } = manifest.variant {
@@ -176,13 +188,15 @@ fn resource_mapped(bundle_dir: &Path, src_name: &str, target_name: &str) -> Reso
 /// Package the bundle using cargo-packager for the given formats.
 pub fn run_packager(
     config: &Config,
+    project_dir: &Path,
     bundle_dir: &Path,
     dist_dir: &Path,
     manifest: &BundleManifest,
     formats: &[PackagerFormat],
 ) -> Result<()> {
-    let packager_config = build_packager_config(config, bundle_dir, dist_dir, manifest, formats)
-        .context("building cargo-packager config")?;
+    let packager_config =
+        build_packager_config(config, project_dir, bundle_dir, dist_dir, manifest, formats)
+            .context("building cargo-packager config")?;
 
     let outputs =
         cargo_packager::package(&packager_config).context("cargo-packager packaging failed")?;
