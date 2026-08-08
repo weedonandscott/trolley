@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rpm::{FileMode, FileOptions};
-use trolley_config::{Config, rpm_arch};
+use trolley_config::{ArtifactNaming, Config, PlannedFormat, rpm_arch};
 use walkdir::WalkDir;
 
 use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
@@ -46,6 +46,7 @@ pub fn build(
     dist_dir: &Path,
     config: &Config,
     manifest: &BundleManifest,
+    planned: PlannedFormat,
 ) -> Result<()> {
     let BundleVariant::Linux {
         ref wrapper_name,
@@ -55,12 +56,13 @@ pub fn build(
         unreachable!("RPM build called for non-Linux target");
     };
 
-    let arch = rpm_arch(&manifest.target);
-    let filename = format!(
-        "{slug}-{version}-1.{arch}.rpm",
-        slug = config.app.slug,
-        version = config.app.version
-    );
+    let arch = rpm_arch(&planned.target());
+    let ArtifactNaming::Composed(filename) = planned.artifact_name(&config.app) else {
+        anyhow::bail!(
+            "bug: {} artifacts are always trolley-named",
+            planned.format()
+        );
+    };
     let output_path = dist_dir.join(&filename);
 
     // Use a temp dir for files the rpm builder needs (empty dir placeholder, wrapper script)
