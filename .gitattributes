@@ -1,0 +1,4 @@
+# The sanity test diffs these snapshots byte-for-byte against a listing it
+# generates at run time. Keep LF in the working tree so the Windows runner's
+# autocrlf checkout doesn't add CR to every expected line.
+tests/sanity/listings/*.list text eol=lf

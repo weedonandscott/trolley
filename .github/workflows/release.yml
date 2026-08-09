@@ -35,6 +35,20 @@ jobs:
           fi
           echo "version=$FILE_VERSION" >> "$GITHUB_OUTPUT"
 
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Update Rust
+        run: rustup update stable
+      - name: Install just
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+      - name: Run unit tests
+        run: just test
+
   build-linux:
     needs: validate
     strategy:
@@ -88,8 +102,15 @@ jobs:
         include:
           - target: x86_64-macos
             runner: macos-15-large
+            # `nix develop` builds the bash it runs the command under from the
+            # flake's own `nixpkgs` input, not from `nixpkgs-x86_64-darwin`.
+            # nixos-unstable (26.11) throws for x86_64-darwin; nix ignores that
+            # failure and falls back to Apple's bash 3.2, which cannot parse the
+            # `;&` in stdenv's setup.sh. Override the input for this runner.
+            nix_overrides: --override-input nixpkgs github:NixOS/nixpkgs/nixpkgs-26.05-darwin
           - target: aarch64-macos
             runner: macos-15
+            nix_overrides: ""
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +145,7 @@ jobs:
         run: just release-cli --target ${{ matrix.target }}
 
       - name: Build and package runtime
-        run: nix develop -L -v -c just release-runtime --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
+        run: nix develop ${{ matrix.nix_overrides }} -L -v -c just release-runtime --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
 
       - name: Sanity test
         run: just sanity-test --target ${{ matrix.target }}
@@ -206,7 +227,7 @@ jobs:
 
   release:
     if: github.event_name != 'pull_request'
-    needs: [validate, build-linux, build-macos, build-windows]
+    needs: [validate, test, build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

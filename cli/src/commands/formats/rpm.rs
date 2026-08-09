@@ -5,15 +5,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rpm::{FileMode, FileOptions};
-use trolley_config::{Config, rpm_arch};
+use trolley_config::{ArtifactNaming, Config, PlannedFormat, rpm_arch};
 use walkdir::WalkDir;
 
-use super::super::common::{BundleManifest, BundleVariant};
+use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
 
-/// Resolve PNG icon paths from the config's icon globs.
-fn resolve_png_icons(config: &Config) -> Result<Vec<PathBuf>> {
+/// Resolve PNG icon paths from the config's icon globs. Patterns are
+/// project-relative (same semantics as resolve_windows_icon), so anchor them
+/// to the project dir rather than globbing against the process CWD.
+fn resolve_png_icons(config: &Config, project_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut pngs = Vec::new();
     for pattern in &config.app.icons {
+        let pattern = &anchored_glob_pattern(project_dir, pattern);
         for entry in glob::glob(pattern)
             .with_context(|| format!("invalid icon glob: {pattern}"))?
         {
@@ -38,10 +41,12 @@ fn png_dimensions(path: &Path) -> Result<(u32, u32)> {
 }
 
 pub fn build(
+    project_dir: &Path,
     bundle_dir: &Path,
     dist_dir: &Path,
     config: &Config,
     manifest: &BundleManifest,
+    planned: PlannedFormat,
 ) -> Result<()> {
     let BundleVariant::Linux {
         ref wrapper_name,
@@ -51,12 +56,13 @@ pub fn build(
         unreachable!("RPM build called for non-Linux target");
     };
 
-    let arch = rpm_arch(&manifest.target);
-    let filename = format!(
-        "{slug}-{version}-1.{arch}.rpm",
-        slug = config.app.slug,
-        version = config.app.version
-    );
+    let arch = rpm_arch(&planned.target());
+    let ArtifactNaming::Composed(filename) = planned.artifact_name(&config.app) else {
+        anyhow::bail!(
+            "bug: {} artifacts are always trolley-named",
+            planned.format()
+        );
+    };
     let output_path = dist_dir.join(&filename);
 
     // Use a temp dir for files the rpm builder needs (empty dir placeholder, wrapper script)
@@ -128,7 +134,7 @@ pub fn build(
     )?;
 
     // Install PNG icons into /usr/share/icons/hicolor/<WxH>/apps/<slug>.png
-    for icon_path in resolve_png_icons(config)? {
+    for icon_path in resolve_png_icons(config, project_dir)? {
         let (width, height) = png_dimensions(&icon_path)?;
         let dest = format!(
             "/usr/share/icons/hicolor/{width}x{height}/apps/{}.png",

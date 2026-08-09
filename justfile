@@ -37,6 +37,10 @@ _runtime-target target:
         *)               echo "Unknown target: {{ target }}" >&2; exit 1 ;;
     esac
 
+# Run Rust unit tests (CLI + config crates)
+test *flags:
+    cargo test --workspace {{ flags }}
+
 # Build the trolley CLI
 
 # Flags: [--release] [--target <triple>]
@@ -298,12 +302,14 @@ release-runtime *flags:
 # Requires: --target <triple>
 release *flags: (release-cli flags) (release-runtime flags)
 
-# Sanity-test the release artifacts: init a project, bundle-only package
-# Requires: --target <triple>
+# Sanity-test the release artifacts: init a project, package all default
+# formats, diff dist/ against its committed listing snapshot
+# Requires: --target <triple>; --bless rewrites the dist listing snapshot
 sanity-test *flags:
     #!/usr/bin/env bash
     set -euo pipefail
     target=""
+    bless=""
     next_is_target=""
     for flag in {{ flags }}; do
         if [ -n "$next_is_target" ]; then
@@ -313,6 +319,7 @@ sanity-test *flags:
         fi
         case "$flag" in
             --target)  next_is_target=1 ;;
+            --bless)   bless=1 ;;
             *)         echo "Unknown flag: $flag" >&2; exit 1 ;;
         esac
     done
@@ -343,12 +350,78 @@ sanity-test *flags:
         echo "Error: trolley.toml was not created" >&2; exit 1
     fi
 
+    # Two-word display name so the rename layer is observable: cargo-packager's
+    # default AppImage/dmg/NSIS names differ from the composed Project_Sanity_*
+    # names, so a broken rename fails the dist listing diff on every OS.
+    # (sed -i.bak + rm is portable across GNU and BSD sed.)
+    sed -i.bak 's/^display_name = .*/display_name = "Project Sanity"/' "$test_dir/project/trolley.toml" && rm "$test_dir/project/trolley.toml.bak"
+
     mkdir -p "$test_dir/project/path/to"
     cp "$cli" "$test_dir/project/path/to/project"
 
     echo "==> trolley package --bundle-only"
     TROLLEY_RUNTIME_SOURCE="$runtime" \
         "$cli" package --bundle-only --config "$test_dir/project/trolley.toml"
+
+    # Full packaging with the target's default formats, then diff the dist/
+    # listing against a committed snapshot. This catches builders bypassing
+    # the artifact naming API — the dist filename structure is a released
+    # contract, so a mismatch here is a breaking change.
+    echo "==> trolley package (default formats)"
+    arch="${target%%-*}"
+    if [[ "$target" == *-linux ]]; then
+        # AppImage requires a square icon; give the init project one.
+        base64 -d > "$test_dir/project/icon.png" <<'ICON'
+    iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDolAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURWYzmf///129H+IAAAABYktHRAH/Ai3eAAAAH0lEQVRo3u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAvg0hAAABfxmcpwAAAABJRU5ErkJggg==
+    ICON
+        sed -i '/^\[app\]$/a icons = ["icon.png"]' "$test_dir/project/trolley.toml"
+        # CI runners have no FUSE; tell linuxdeploy to self-extract instead
+        export APPIMAGE_EXTRACT_AND_RUN=1
+    fi
+    TROLLEY_RUNTIME_SOURCE="$runtime" \
+        "$cli" package --config "$test_dir/project/trolley.toml"
+
+    dist="$test_dir/project/trolley/build/com.example.project/$target/dist"
+    snap="{{ justfile_directory() }}/tests/sanity/listings/${target}.list"
+    actual=$(cd "$dist" && LC_ALL=C ls -A | LC_ALL=C sort)
+    if [ -n "$bless" ]; then
+        printf '%s\n' "$actual" > "$snap"
+        echo "==> blessed $snap"
+    else
+        # A real file, not process substitution: MSYS diff on the Windows
+        # runner cannot open /dev/fd/NN.
+        printf '%s\n' "$actual" > "$test_dir/listing.actual"
+        if ! diff -u "$snap" "$test_dir/listing.actual"; then
+            echo "Error: dist/ listing does not match $snap (run with --bless to update, then review the git diff)" >&2
+            exit 1
+        fi
+    fi
+    if [[ "$target" == *-linux ]]; then
+        # The generated PKGBUILD must point at the pacman tarball the listing
+        # proved exists — guards both names drifting in lock-step.
+        if ! grep -qF "source=(\"project_0.1.0_${arch}.tar.gz\")" "$dist/PKGBUILD"; then
+            echo "Error: PKGBUILD source=() does not reference project_0.1.0_${arch}.tar.gz" >&2
+            exit 1
+        fi
+
+        # The icon must be embedded in each Linux package — the listing diff
+        # only proves filenames, not contents.
+        icon_path="usr/share/icons/hicolor/256x256/apps/project.png"
+        deb_arch="amd64"; if [ "$arch" = "aarch64" ]; then deb_arch="arm64"; fi
+        if ! dpkg-deb -c "$dist/project_0.1.0_${deb_arch}.deb" | grep -qF "$icon_path"; then
+            echo "Error: deb is missing $icon_path" >&2
+            exit 1
+        fi
+        if ! rpm -qlp "$dist/project-0.1.0-1.${arch}.rpm" | grep -qF "/$icon_path"; then
+            echo "Error: rpm is missing /$icon_path" >&2
+            exit 1
+        fi
+        (cd "$test_dir" && "$dist/Project_Sanity_0.1.0_${arch}.AppImage" --appimage-extract "$icon_path" >/dev/null)
+        if [ ! -f "$test_dir/squashfs-root/$icon_path" ]; then
+            echo "Error: AppImage is missing $icon_path" >&2
+            exit 1
+        fi
+    fi
 
     echo "==> Sanity test passed"
 

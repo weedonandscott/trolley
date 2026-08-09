@@ -3,9 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use cargo_packager::PackageFormat;
 use cargo_packager::config::{Binary, Config as PackagerConfig, Resource};
-use trolley_config::Config;
+use trolley_config::{ArtifactNaming, Config, Format};
 
-use super::super::common::{BundleManifest, BundleVariant};
+use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
 
 /// Formats handled by cargo-packager. Every variant maps 1:1 to a PackageFormat.
 pub enum PackagerFormat {
@@ -42,8 +42,9 @@ impl PackagerFormat {
 /// TUI core, configs, and fonts are resources placed next to it in `$INSTDIR`.
 fn build_packager_config(
     config: &Config,
+    project_dir: &Path,
     bundle_dir: &Path,
-    dist_dir: &Path,
+    out_dir: &Path,
     manifest: &BundleManifest,
     formats: &[PackagerFormat],
 ) -> Result<PackagerConfig> {
@@ -101,15 +102,26 @@ fn build_packager_config(
     packager_config.identifier = Some(config.app.identifier.clone());
     packager_config.binaries = binaries;
     packager_config.formats = Some(packager_formats);
-    packager_config.out_dir = dist_dir.to_path_buf();
+    packager_config.out_dir = out_dir.to_path_buf();
     packager_config.binaries_dir = Some(bundle_dir.to_path_buf());
     packager_config.target_triple = Some(manifest.target.target_triple().to_string());
     packager_config.description = Some(config.app.display_name.clone());
     packager_config.resources = Some(resource_files);
+    // Icon patterns are project-relative in trolley.toml (same semantics as
+    // resolve_windows_icon); cargo-packager globs them relative to the CWD,
+    // so anchor them to the project dir first, escaping glob metacharacters
+    // in the directory prefix.
     packager_config.icons = if config.app.icons.is_empty() {
         None
     } else {
-        Some(config.app.icons.clone())
+        Some(
+            config
+                .app
+                .icons
+                .iter()
+                .map(|pattern| anchored_glob_pattern(project_dir, pattern))
+                .collect(),
+        )
     };
 
     if let BundleVariant::Linux { .. } = manifest.variant {
@@ -165,6 +177,20 @@ fn build_packager_config(
     Ok(packager_config)
 }
 
+/// Map a cargo-packager output format back to the trolley `Format` it was
+/// registered for, to look up our composed artifact name.
+fn trolley_format(format: &PackageFormat) -> Option<Format> {
+    match format {
+        PackageFormat::Deb => Some(Format::Deb),
+        PackageFormat::AppImage => Some(Format::AppImage),
+        PackageFormat::Pacman => Some(Format::Pacman),
+        PackageFormat::Nsis => Some(Format::Nsis),
+        PackageFormat::App => Some(Format::MacApp),
+        PackageFormat::Dmg => Some(Format::Dmg),
+        _ => None,
+    }
+}
+
 /// Create a `Resource::Mapped` pointing from a bundle file to its target name.
 fn resource_mapped(bundle_dir: &Path, src_name: &str, target_name: &str) -> Resource {
     Resource::Mapped {
@@ -173,27 +199,78 @@ fn resource_mapped(bundle_dir: &Path, src_name: &str, target_name: &str) -> Reso
     }
 }
 
+/// Move a packager output from the staging dir into dist. The output dir is
+/// wiped at the start of every run, so the destination never exists.
+fn move_into_dist(src: &Path, dist_dir: &Path, name: &str) -> Result<()> {
+    let dest = dist_dir.join(name);
+    std::fs::rename(src, &dest)
+        .with_context(|| format!("moving {} to {}", src.display(), dest.display()))
+}
+
 /// Package the bundle using cargo-packager for the given formats.
+///
+/// cargo-packager is pointed at a staging dir (a sibling of dist) because it
+/// unconditionally drops its `.cargo-packager` intermediates dir into its
+/// out_dir; finished artifacts are then moved into dist under their final
+/// names, keeping dist free of build droppings.
 pub fn run_packager(
     config: &Config,
+    project_dir: &Path,
     bundle_dir: &Path,
     dist_dir: &Path,
     manifest: &BundleManifest,
     formats: &[PackagerFormat],
 ) -> Result<()> {
-    let packager_config = build_packager_config(config, bundle_dir, dist_dir, manifest, formats)
-        .context("building cargo-packager config")?;
+    let work_dir = dist_dir
+        .parent()
+        .context("dist dir has no parent")?
+        .join("packager");
+    std::fs::create_dir_all(&work_dir)
+        .with_context(|| format!("creating packager staging dir {}", work_dir.display()))?;
+
+    let packager_config =
+        build_packager_config(config, project_dir, bundle_dir, &work_dir, manifest, formats)
+            .context("building cargo-packager config")?;
 
     let outputs =
         cargo_packager::package(&packager_config).context("cargo-packager packaging failed")?;
 
     for output in &outputs {
-        for path in &output.paths {
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy())
-                .unwrap_or_default();
-            println!("  {filename}  ({:?} package)", output.format);
+        let naming = trolley_format(&output.format)
+            .map(|f| f.for_target(manifest.target))
+            .transpose()
+            .context("cargo-packager emitted an output for a format invalid for this target")?
+            .map(|p| p.artifact_name(&config.app));
+
+        match naming {
+            Some(ArtifactNaming::Composed(new_name)) => {
+                let [path] = output.paths.as_slice() else {
+                    anyhow::bail!(
+                        "expected exactly one artifact for {:?}, got {}",
+                        output.format,
+                        output.paths.len()
+                    );
+                };
+                move_into_dist(path, dist_dir, &new_name)?;
+                println!("  {new_name}  ({:?} package)", output.format);
+            }
+            Some(ArtifactNaming::KeepProducerName) | None => {
+                for path in &output.paths {
+                    let filename = path
+                        .file_name()
+                        .with_context(|| format!("artifact {} has no filename", path.display()))?
+                        .to_string_lossy()
+                        .into_owned();
+                    move_into_dist(path, dist_dir, &filename)?;
+                    println!("  {filename}  ({:?} package)", output.format);
+                }
+                // Pacman writes a PKGBUILD next to its tarball but does not
+                // report it as an output; its source=() references the tarball
+                // by filename, so the pair must travel together.
+                if matches!(output.format, PackageFormat::Pacman) {
+                    move_into_dist(&work_dir.join("PKGBUILD"), dist_dir, "PKGBUILD")?;
+                }
+            }
         }
     }
 

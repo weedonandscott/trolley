@@ -4,20 +4,20 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use trolley_config::Config;
-
-use super::super::common::BundleManifest;
+use trolley_config::{ArtifactNaming, Config, PlannedFormat};
 
 pub fn build(
     bundle_dir: &Path,
     dist_dir: &Path,
     config: &Config,
-    manifest: &BundleManifest,
+    planned: PlannedFormat,
 ) -> Result<()> {
-    let filename = format!(
-        "{}-{}-{}.tar.gz",
-        config.app.slug, config.app.version, manifest.target
-    );
+    let ArtifactNaming::Composed(filename) = planned.artifact_name(&config.app) else {
+        anyhow::bail!(
+            "bug: {} artifacts are always trolley-named",
+            planned.format()
+        );
+    };
     let output_path = dist_dir.join(&filename);
 
     let file = fs::File::create(&output_path)

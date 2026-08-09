@@ -144,6 +144,11 @@ The manifest file `trolley.toml` has the following sections:
 | `version`      | Version string                             |
 | `icons`        | List of icon paths/globs ([see Icons](#icons)) |
 
+`display_name` flows is used for packages filenames, so it must be safe:
+non-empty, no leading/trailing whitespace, no path separators (`/`, `\`),
+no control characters, and no characters invalid in Windows filenames
+(`:`, `*`, `?`, `"`, `<`, `>`, `|`).
+
 ### `[linux]`, `[macos]`, `[windows]` -- at least one required
 
 ```toml
@@ -410,6 +415,29 @@ Use `--skip-failed-formats` to continue building remaining formats if one fails
 ```
 trolley package --skip-failed-formats
 ```
+
+### Packages naming
+
+Artifacts in `dist/` are dervices from the `[app]` config, so the filename
+structure is a stable contract. Those are the derivations:
+
+| Format   | Filename                                    |
+|----------|---------------------------------------------|
+| NSIS     | `{display_name}_{version}_{arch}-setup.exe` |
+| .dmg     | `{display_name}_{version}_{arch}.dmg`       |
+| AppImage | `{display_name}_{version}_{arch}.AppImage`  |
+| .app     | `{display name}.app`                        |
+| .deb     | `{slug}_{version}_{amd64\|arm64}.deb`       |
+| .rpm     | `{slug}-{version}-1.{arch}.rpm`             |
+| .tar.gz  | `{slug}-{version}-{target}.tar.gz`          |
+| pacman   | kept as produced (see below)                |
+
+- `{arch}` is `x86_64` or `aarch64`
+- `{target}` is the full target like `x86_64-linux`
+- Spaces in `display_name` become underscores, except in the `.app` bundle name,
+  which keeps the display name verbatim for Finder.
+- pacman is the only one still named by cargo-packager, because `PKGBUILD`
+  references the tarball filename byte-for-byte
 
 ## BUNDLING != SANDBOXING
 

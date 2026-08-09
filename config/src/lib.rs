@@ -258,6 +258,26 @@ impl Format {
             Format::Dmg => "dmg",
         }
     }
+
+    /// Pair this format with a target, checking validity. The single validity
+    /// boundary: possession of the returned `PlannedFormat` is proof the pair
+    /// is valid.
+    pub fn for_target(
+        self,
+        target: Target,
+    ) -> std::result::Result<PlannedFormat, InvalidFormatForTarget> {
+        if self.valid_for(&target) {
+            Ok(PlannedFormat {
+                format: self,
+                target,
+            })
+        } else {
+            Err(InvalidFormatForTarget {
+                format: self,
+                target,
+            })
+        }
+    }
 }
 
 impl fmt::Display for Format {
@@ -266,8 +286,98 @@ impl fmt::Display for Format {
     }
 }
 
-/// Map a Linux target to the Debian architecture string.
-pub fn deb_arch(target: &Target) -> &'static str {
+/// Error: the format does not apply to the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidFormatForTarget {
+    pub format: Format,
+    pub target: Target,
+}
+
+impl fmt::Display for InvalidFormatForTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "format {} is not valid for target {}",
+            self.format, self.target
+        )
+    }
+}
+
+impl std::error::Error for InvalidFormatForTarget {}
+
+/// A format paired with a target it is valid for. The only constructor is
+/// `Format::for_target`, so possession is proof of validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedFormat {
+    format: Format,
+    target: Target,
+}
+
+/// How a built artifact gets its final filename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactNaming {
+    /// Trolley-composed filename (the released contract).
+    Composed(String),
+    /// Keep the producer's filename. Pacman: the generated PKGBUILD
+    /// references its tarball by name, so renaming would break makepkg.
+    KeepProducerName,
+}
+
+impl PlannedFormat {
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// Final artifact filename for this format, composed entirely from app
+    /// config — producer filenames (cargo-packager's or our own builders') are
+    /// never read, so their conventions can't drift into ours. Vocabulary per
+    /// ecosystem: display name (spaces -> `_`) for direct-download artifacts,
+    /// display name verbatim for the Finder-visible `.app`, slug + ecosystem
+    /// arch for distro packages. `KeepProducerName` keeps the producer's name —
+    /// pacman's generated PKGBUILD references its tarball by filename, so
+    /// renaming would break `makepkg`.
+    ///
+    /// Total: naming is defined for every constructible `PlannedFormat`.
+    ///
+    /// The exact structure is a released contract (download URLs, CI scripts,
+    /// update checks): any change is breaking and must be deliberate.
+    pub fn artifact_name(&self, app: &App) -> ArtifactNaming {
+        let target = self.target;
+        let display = app.display_name.replace(' ', "_");
+        let slug = &app.slug;
+        let version = &app.version;
+        let arch = target.arch();
+        match self.format {
+            Format::Nsis => {
+                ArtifactNaming::Composed(format!("{display}_{version}_{arch}-setup.exe"))
+            }
+            Format::Dmg => ArtifactNaming::Composed(format!("{display}_{version}_{arch}.dmg")),
+            Format::AppImage => {
+                ArtifactNaming::Composed(format!("{display}_{version}_{arch}.AppImage"))
+            }
+            Format::MacApp => ArtifactNaming::Composed(format!("{}.app", app.display_name)),
+            Format::Deb => {
+                ArtifactNaming::Composed(format!("{slug}_{version}_{}.deb", deb_arch(&target)))
+            }
+            Format::Rpm => {
+                ArtifactNaming::Composed(format!("{slug}-{version}-1.{}.rpm", rpm_arch(&target)))
+            }
+            Format::Archive => {
+                ArtifactNaming::Composed(format!("{slug}-{version}-{target}.tar.gz"))
+            }
+            Format::Pacman => ArtifactNaming::KeepProducerName,
+        }
+    }
+}
+
+/// Map a Linux target to the Debian architecture string. Only reachable via
+/// `PlannedFormat::artifact_name`, where `Deb` is provably paired with a Linux
+/// target.
+fn deb_arch(target: &Target) -> &'static str {
     match target {
         Target::X86_64Linux => "amd64",
         Target::Aarch64Linux => "arm64",
@@ -276,6 +386,10 @@ pub fn deb_arch(target: &Target) -> &'static str {
 }
 
 /// Map a Linux target to the RPM architecture string.
+///
+/// Precondition: `target` is Linux — panics otherwise. Public because the RPM
+/// builder needs the arch string for the package metadata field (not just the
+/// filename), under its own Linux-variant guard.
 pub fn rpm_arch(target: &Target) -> &'static str {
     match target {
         Target::X86_64Linux => "x86_64",
@@ -576,9 +690,9 @@ impl Config {
             errors.push(format!("[app] identifier: {e}"));
         }
 
-        // app.display_name must be non-empty
-        if self.app.display_name.trim().is_empty() {
-            errors.push("[app] display_name must not be empty".into());
+        // app.display_name flows into artifact filenames; it must be filename-safe
+        if let Err(e) = validate_display_name(&self.app.display_name) {
+            errors.push(format!("[app] display_name: {e}"));
         }
 
         // app.slug must be valid
@@ -969,6 +1083,40 @@ fn validate_slug(slug: &str) -> std::result::Result<(), String> {
         return Err(format!(
             "\"{slug}\" must contain only lowercase ASCII alphanumeric characters and hyphens"
         ));
+    }
+    Ok(())
+}
+
+/// Validate that a display name is safe to compose into artifact filenames.
+///
+/// Rules:
+/// - Non-empty and not whitespace-only
+/// - No leading/trailing whitespace
+/// - No path separators (`/`, `\`) — these would redirect the artifact rename
+/// - No characters invalid in Windows filenames (`:`, `*`, `?`, `"`, `<`, `>`, `|`)
+/// - No control characters
+fn validate_display_name(name: &str) -> std::result::Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("must not be empty".into());
+    }
+    if name != name.trim() {
+        return Err(format!(
+            "\"{name}\" must not have leading or trailing whitespace"
+        ));
+    }
+    if name.contains(['/', '\\']) {
+        return Err(format!(
+            "\"{name}\" must not contain path separators ('/' or '\\')"
+        ));
+    }
+    if name.contains([':', '*', '?', '"', '<', '>', '|']) {
+        return Err(format!(
+            "\"{name}\" must not contain characters invalid in Windows filenames \
+             (':', '*', '?', '\"', '<', '>', '|')"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(format!("\"{name}\" must not contain control characters"));
     }
     Ok(())
 }
@@ -1548,10 +1696,63 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
 
     #[test]
     fn validate_empty_display_name() {
+        for name in ["", "  "] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name: must not be empty"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_accepts_multi_word_names() {
+        for name in ["Project Sanity", "Hello World"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            assert!(m.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_path_separators() {
+        for name in ["a/b", "a\\b"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("path separators"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_windows_reserved_characters() {
+        for name in ["Foo: Bar", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b"] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("invalid in Windows filenames"));
+        }
+    }
+
+    #[test]
+    fn validate_display_name_rejects_control_characters() {
         let mut m = minimal_manifest();
-        m.app.display_name = "  ".into();
+        m.app.display_name = "a\tb".into();
         let err = m.validate().unwrap_err().to_string();
-        assert!(err.contains("display_name must not be empty"));
+        assert!(err.contains("[app] display_name"));
+        assert!(err.contains("control characters"));
+    }
+
+    #[test]
+    fn validate_display_name_rejects_surrounding_whitespace() {
+        for name in [" x", "x "] {
+            let mut m = minimal_manifest();
+            m.app.display_name = name.into();
+            let err = m.validate().unwrap_err().to_string();
+            assert!(err.contains("[app] display_name"));
+            assert!(err.contains("leading or trailing whitespace"));
+        }
     }
 
     #[test]
@@ -2412,5 +2613,156 @@ categories = "Utility"
         m.app.slug = "Bad Slug!".into();
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("[app] slug:"));
+    }
+
+    // Artifact naming contract. The exact strings are released structure —
+    // download URLs, CI scripts, and update checks depend on them — so any
+    // change here is breaking and must be deliberate.
+    mod artifact_names {
+        use super::*;
+
+        /// Two-word display name so space handling is exercised.
+        fn app() -> App {
+            App {
+                identifier: "com.example.trolley".into(),
+                display_name: "Tech Trolley".into(),
+                slug: "trolley".into(),
+                version: "1.2.3".into(),
+                icons: vec![],
+            }
+        }
+
+        /// Name a valid pair through the boundary.
+        fn name(f: Format, t: Target) -> ArtifactNaming {
+            f.for_target(t).unwrap().artifact_name(&app())
+        }
+
+        fn composed(s: &str) -> ArtifactNaming {
+            ArtifactNaming::Composed(s.into())
+        }
+
+        #[test]
+        fn nsis_is_underscored_display_name_version_arch_setup() {
+            assert_eq!(
+                name(Format::Nsis, Target::X86_64Windows),
+                composed("Tech_Trolley_1.2.3_x86_64-setup.exe")
+            );
+            assert_eq!(
+                name(Format::Nsis, Target::Aarch64Windows),
+                composed("Tech_Trolley_1.2.3_aarch64-setup.exe")
+            );
+        }
+
+        #[test]
+        fn dmg_is_underscored_display_name_version_arch() {
+            assert_eq!(
+                name(Format::Dmg, Target::X86_64Macos),
+                composed("Tech_Trolley_1.2.3_x86_64.dmg")
+            );
+            assert_eq!(
+                name(Format::Dmg, Target::Aarch64Macos),
+                composed("Tech_Trolley_1.2.3_aarch64.dmg")
+            );
+        }
+
+        #[test]
+        fn appimage_is_underscored_display_name_version_arch() {
+            assert_eq!(
+                name(Format::AppImage, Target::X86_64Linux),
+                composed("Tech_Trolley_1.2.3_x86_64.AppImage")
+            );
+            assert_eq!(
+                name(Format::AppImage, Target::Aarch64Linux),
+                composed("Tech_Trolley_1.2.3_aarch64.AppImage")
+            );
+        }
+
+        #[test]
+        fn mac_app_keeps_display_name_verbatim_including_spaces() {
+            assert_eq!(
+                name(Format::MacApp, Target::Aarch64Macos),
+                composed("Tech Trolley.app")
+            );
+        }
+
+        #[test]
+        fn deb_is_slug_version_debian_arch() {
+            assert_eq!(
+                name(Format::Deb, Target::X86_64Linux),
+                composed("trolley_1.2.3_amd64.deb")
+            );
+            assert_eq!(
+                name(Format::Deb, Target::Aarch64Linux),
+                composed("trolley_1.2.3_arm64.deb")
+            );
+        }
+
+        #[test]
+        fn rpm_is_slug_version_release_rpm_arch() {
+            assert_eq!(
+                name(Format::Rpm, Target::X86_64Linux),
+                composed("trolley-1.2.3-1.x86_64.rpm")
+            );
+            assert_eq!(
+                name(Format::Rpm, Target::Aarch64Linux),
+                composed("trolley-1.2.3-1.aarch64.rpm")
+            );
+        }
+
+        #[test]
+        fn archive_is_slug_version_full_target() {
+            assert_eq!(
+                name(Format::Archive, Target::X86_64Linux),
+                composed("trolley-1.2.3-x86_64-linux.tar.gz")
+            );
+            assert_eq!(
+                name(Format::Archive, Target::Aarch64Macos),
+                composed("trolley-1.2.3-aarch64-macos.tar.gz")
+            );
+            assert_eq!(
+                name(Format::Archive, Target::X86_64Windows),
+                composed("trolley-1.2.3-x86_64-windows.tar.gz")
+            );
+        }
+
+        #[test]
+        fn pacman_passes_through_because_pkgbuild_references_the_tarball() {
+            assert_eq!(
+                name(Format::Pacman, Target::X86_64Linux),
+                ArtifactNaming::KeepProducerName
+            );
+        }
+
+        #[test]
+        fn invalid_pairs_are_rejected_at_the_boundary() {
+            for (f, t) in [
+                (Format::Deb, Target::X86_64Windows),
+                (Format::Rpm, Target::Aarch64Macos),
+                (Format::Nsis, Target::X86_64Linux),
+                (Format::Dmg, Target::X86_64Windows),
+                (Format::MacApp, Target::X86_64Windows),
+            ] {
+                let err = f.for_target(t).unwrap_err();
+                assert_eq!(
+                    err,
+                    InvalidFormatForTarget {
+                        format: f,
+                        target: t
+                    }
+                );
+                assert_eq!(
+                    err.to_string(),
+                    format!("format {f} is not valid for target {t}")
+                );
+                assert!(err.to_string().contains("not valid for target"));
+            }
+        }
+
+        #[test]
+        fn archive_is_valid_for_every_target() {
+            for t in Target::ALL {
+                assert!(Format::Archive.for_target(*t).is_ok());
+            }
+        }
     }
 }

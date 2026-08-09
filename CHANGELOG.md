@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### CLI
+
+<<<<<<< HEAD
+- [all] **BREAKING:** derive package filenames from the trolley config.
+        Previously decided by `cargo-packager` (which carried the internal
+        `_runtime` suffix on Windows). Installers use the display name (`My_App_1.2.3_x86_64-setup.exe`),
+        package-manager artifacts the slug (`myapp_1.2.3_amd64.deb`). pacman
+        still delegated to `cargo-packager` since there's PKGBUILD <> tarball
+        coordination there. Full scheme in README → Artifact naming.
+- [all] **BREAKING:** Validate `display_name` at config load: reject path
+        separators, control characters, and Windows-reserved filename characters
+- [all] `dist/` no longer contains the `.cargo-packager` intermediates directory
+        packaging runs in a staging dir and only finished artifacts are moved in
+- [all] Fix icon globs resolving against the process working directory instead
+        of the project directory (RPM icons were silently dropped when packaging
+        from elsewhere), and escape glob metacharacters in the project path
+        (e.g. a directory named `app [beta]`)
+- [all] CI: releases are now gated on the test suite, and per-target sanity runs
+        diff the packaged `dist/` listing against committed snapshots (`tests/sanity/listings/`)
+        and verify icons are embedded in Linux packages
+
 ## 0.9.0
 
 ### Runtime

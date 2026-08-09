@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use trolley_config::{Format, Target};
+use trolley_config::{Format, InvalidFormatForTarget, PlannedFormat, Target};
 
 use super::common;
 use common::ProjectContext;
@@ -19,7 +19,7 @@ pub fn run(
     formats: Option<Vec<Format>>,
     skip_failed_formats: bool,
 ) -> Result<PathBuf> {
-    let formats = match formats {
+    let mut formats = match formats {
         Some(formats) => formats,
         None => {
             if target.is_linux() {
@@ -34,14 +34,27 @@ pub fn run(
         }
     };
 
-    // Validate: each format must be valid for the target
-    let invalid: Vec<_> = formats.iter().filter(|f| !f.valid_for(&target)).collect();
+    // Dedup while keeping order: each format is packaged and moved into dist
+    // exactly once, so `--formats deb,deb` must not build deb twice.
+    let mut seen = std::collections::HashSet::new();
+    formats.retain(|f| seen.insert(*f));
+
+    // Validate: each format must be valid for the target. `for_target` is the
+    // validity boundary; the resulting `PlannedFormat`s carry the proof.
+    let mut planned: Vec<PlannedFormat> = Vec::with_capacity(formats.len());
+    let mut invalid: Vec<InvalidFormatForTarget> = Vec::new();
+    for format in formats {
+        match format.for_target(target) {
+            Ok(p) => planned.push(p),
+            Err(e) => invalid.push(e),
+        }
+    }
     if !invalid.is_empty() {
         bail!(
             "formats {} are not valid for target {}",
             invalid
                 .iter()
-                .map(|f| f.as_str())
+                .map(|e| e.format.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
             target
@@ -206,9 +219,9 @@ pub fn run(
     }
 
     // Build packages unless bundle-only
-    if !bundle_only && !formats.is_empty() {
+    if !bundle_only && !planned.is_empty() {
         println!();
-        super::formats::build_formats(&formats, &bundle_dir, &dist_dir, &ctx.config, &manifest, skip_failed_formats)?;
+        super::formats::build_formats(&planned, &ctx.project_dir, &bundle_dir, &dist_dir, &ctx.config, &manifest, skip_failed_formats)?;
     }
 
     Ok(bundle_dir)

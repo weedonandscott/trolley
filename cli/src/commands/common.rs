@@ -342,14 +342,29 @@ pub fn copy_fonts_to_bundle(font_files: &[PathBuf], output_dir: &Path) -> Result
     Ok(())
 }
 
+/// Anchor a project-relative glob pattern to the project dir, escaping glob
+/// metacharacters in the directory prefix so a path like `.../app [beta]/`
+/// doesn't silently match nothing. Absolute patterns are returned unchanged
+/// (preserving the current `Path::join` semantics).
+pub(crate) fn anchored_glob_pattern(project_dir: &Path, pattern: &str) -> String {
+    if Path::new(pattern).is_absolute() {
+        return pattern.to_string();
+    }
+    format!(
+        "{}{}{}",
+        glob::Pattern::escape(&project_dir.to_string_lossy()),
+        std::path::MAIN_SEPARATOR,
+        pattern
+    )
+}
+
 /// Resolve the first Windows `.ico` declared by `[app].icons`.
 ///
 /// The chosen icon is bundled under a fixed filename so the Windows runtime can
 /// load it without depending on source-tree-relative manifest paths.
 pub fn resolve_windows_icon(project_dir: &Path, config: &Config) -> Result<Option<PathBuf>> {
     for pattern in &config.app.icons {
-        let pattern_path = project_dir.join(pattern);
-        let pattern = pattern_path.to_string_lossy().into_owned();
+        let pattern = anchored_glob_pattern(project_dir, pattern);
         let mut matches = Vec::new();
 
         for entry in
@@ -893,6 +908,53 @@ mod tests {
         manifest.environment.env_file = Some("nonexistent.env".into());
         let result = assemble_environment(dir.path(), &manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn anchored_glob_pattern_escapes_metacharacters_in_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("app [beta]");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("icon.ico"), b"ico").unwrap();
+
+        let pattern = anchored_glob_pattern(&project_dir, "*.ico");
+        let matches: Vec<_> = glob::glob(&pattern)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(matches, vec![project_dir.join("icon.ico")]);
+    }
+
+    #[test]
+    fn anchored_glob_pattern_passes_absolute_patterns_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = dir
+            .path()
+            .join("assets/*.ico")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            anchored_glob_pattern(Path::new("/ignored"), &absolute),
+            absolute
+        );
+    }
+
+    #[test]
+    fn resolve_windows_icon_handles_metacharacters_in_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("app [beta]");
+        let assets_dir = project_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(assets_dir.join("icon.ico"), b"ico").unwrap();
+
+        let mut manifest = test_manifest();
+        manifest.app.icons = vec!["assets/icon.*".into()];
+
+        let resolved = resolve_windows_icon(&project_dir, &manifest).unwrap();
+        assert_eq!(
+            resolved,
+            Some(assets_dir.join("icon.ico").canonicalize().unwrap())
+        );
     }
 
     #[test]
