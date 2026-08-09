@@ -364,7 +364,7 @@ impl PlannedFormat {
                 ArtifactNaming::Composed(format!("{slug}_{version}_{}.deb", deb_arch(&target)))
             }
             Format::Rpm => {
-                ArtifactNaming::Composed(format!("{slug}-{version}-1.{}.rpm", rpm_arch(&target)))
+                ArtifactNaming::Composed(format!("{slug}-{version}.{}.rpm", rpm_arch(&target)))
             }
             Format::Archive => {
                 ArtifactNaming::Composed(format!("{slug}-{version}-{target}.tar.gz"))
@@ -2715,14 +2715,14 @@ categories = "Utility"
         }
 
         #[test]
-        fn rpm_is_slug_version_release_rpm_arch() {
+        fn rpm_is_slug_version_rpm_arch() {
             assert_eq!(
                 name(Format::Rpm, Target::X86_64Linux),
-                composed("trolley-1.2.3-1.x86_64.rpm")
+                composed("trolley-1.2.3.x86_64.rpm")
             );
             assert_eq!(
                 name(Format::Rpm, Target::Aarch64Linux),
-                composed("trolley-1.2.3-1.aarch64.rpm")
+                composed("trolley-1.2.3.aarch64.rpm")
             );
         }
 

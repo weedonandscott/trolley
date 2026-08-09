@@ -428,7 +428,7 @@ structure is a stable contract. Those are the derivations:
 | AppImage | `{display_name}_{version}_{arch}.AppImage`  |
 | .app     | `{display name}.app`                        |
 | .deb     | `{slug}_{version}_{amd64\|arm64}.deb`       |
-| .rpm     | `{slug}-{version}-1.{arch}.rpm`             |
+| .rpm     | `{slug}-{version}.{arch}.rpm`               |
 | .tar.gz  | `{slug}-{version}-{target}.tar.gz`          |
 | pacman   | kept as produced (see below)                |
 
