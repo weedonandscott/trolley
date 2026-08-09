@@ -17,7 +17,9 @@ toml = "1.1"
 url = "2"
 ureq = "3"
 tar = "0.4"
-xz2 = "0.1"
+# static: link the bundled liblzma instead of whatever pkg-config finds —
+# on the mac runners that was homebrew's dylib, which end-user machines lack
+xz2 = { version = "0.1", features = ["static"] }
 ttf-parser = "0.25"
 flate2 = "1"
 rpm = { version = "0.25", default-features = false, features = ["payload", "gzip-compression"] }

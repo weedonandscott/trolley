@@ -79,7 +79,7 @@
           # No Darwin framework inputs needed: the Darwin stdenv ships the
           # Apple SDK (Security, SystemConfiguration, ...) since the
           # darwin.apple_sdk compatibility layer was removed from nixpkgs.
-          buildInputs = [ pkgs.xz ];
+          # No xz input: the xz2 crate's `static` feature builds bundled liblzma.
           # The runtime binary is self-contained (only needs libc) but GLFW
           # loads X11/Wayland/GL at runtime via dlopen.  On NixOS these live
           # in the Nix store, so wrap the CLI with LD_LIBRARY_PATH.
