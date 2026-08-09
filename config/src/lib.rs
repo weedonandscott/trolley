@@ -364,7 +364,7 @@ impl PlannedFormat {
                 ArtifactNaming::Composed(format!("{slug}_{version}_{}.deb", deb_arch(&target)))
             }
             Format::Rpm => {
-                ArtifactNaming::Composed(format!("{slug}-{version}-1.{}.rpm", rpm_arch(&target)))
+                ArtifactNaming::Composed(format!("{slug}-{version}.{}.rpm", rpm_arch(&target)))
             }
             Format::Archive => {
                 ArtifactNaming::Composed(format!("{slug}-{version}-{target}.tar.gz"))
@@ -396,6 +396,16 @@ pub fn rpm_arch(target: &Target) -> &'static str {
         Target::Aarch64Linux => "aarch64",
         _ => unreachable!("rpm_arch called with non-Linux target"),
     }
+}
+
+/// Encode a version for the RPM Version header field. RPM reserves `-` as the
+/// version-release delimiter, so a semver prerelease like `1.2.3-beta.1` is
+/// rejected by the package builder; `~` is the RPM prerelease convention and
+/// sorts before the plain version, matching semver ordering. Header-only: the
+/// artifact filename keeps the verbatim configured version like every other
+/// format.
+pub fn rpm_version(version: &str) -> String {
+    version.replace('-', "~")
 }
 
 // ---------------------------------------------------------------------------
@@ -2455,6 +2465,13 @@ binaries = { x86_64 = "my-app" }
         assert_eq!(rpm_arch(&Target::Aarch64Linux), "aarch64");
     }
 
+    #[test]
+    fn rpm_version_prerelease_hyphen_becomes_tilde() {
+        assert_eq!(rpm_version("1.0.0"), "1.0.0");
+        assert_eq!(rpm_version("1.2.3-beta.1"), "1.2.3~beta.1");
+        assert_eq!(rpm_version("1.2.3-rc.1-hotfix"), "1.2.3~rc.1~hotfix");
+    }
+
     // -----------------------------------------------------------------------
     // Arch
     // -----------------------------------------------------------------------
@@ -2698,14 +2715,14 @@ categories = "Utility"
         }
 
         #[test]
-        fn rpm_is_slug_version_release_rpm_arch() {
+        fn rpm_is_slug_version_rpm_arch() {
             assert_eq!(
                 name(Format::Rpm, Target::X86_64Linux),
-                composed("trolley-1.2.3-1.x86_64.rpm")
+                composed("trolley-1.2.3.x86_64.rpm")
             );
             assert_eq!(
                 name(Format::Rpm, Target::Aarch64Linux),
-                composed("trolley-1.2.3-1.aarch64.rpm")
+                composed("trolley-1.2.3.aarch64.rpm")
             );
         }
 

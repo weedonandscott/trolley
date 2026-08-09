@@ -412,7 +412,7 @@ sanity-test *flags:
             echo "Error: deb is missing $icon_path" >&2
             exit 1
         fi
-        if ! rpm -qlp "$dist/project-0.1.0-1.${arch}.rpm" | grep -qF "/$icon_path"; then
+        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -qF "/$icon_path"; then
             echo "Error: rpm is missing /$icon_path" >&2
             exit 1
         fi
