@@ -438,6 +438,10 @@ structure is a stable contract. Those are the derivations:
   which keeps the display name verbatim for Finder.
 - pacman is the only one still named by cargo-packager, because `PKGBUILD`
   references the tarball filename byte-for-byte
+- Filenames always use `version` verbatim. Inside the RPM package header,
+  hyphens are encoded as `~` (`1.2.3-beta.1` → `1.2.3~beta.1`) because RPM
+  reserves `-` as the version-release delimiter; `~` is the RPM prerelease
+  convention and sorts before the plain version, matching semver.
 
 ## BUNDLING != SANDBOXING
 

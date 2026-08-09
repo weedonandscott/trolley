@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rpm::{FileMode, FileOptions};
-use trolley_config::{ArtifactNaming, Config, PlannedFormat, rpm_arch};
+use trolley_config::{ArtifactNaming, Config, PlannedFormat, rpm_arch, rpm_version};
 use walkdir::WalkDir;
 
 use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
@@ -76,7 +76,7 @@ pub fn build(
 
     let mut builder = rpm::PackageBuilder::new(
         &config.app.slug,
-        &config.app.version,
+        &rpm_version(&config.app.version),
         "Proprietary",
         arch,
         &config.app.display_name,

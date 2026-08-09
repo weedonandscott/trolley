@@ -398,6 +398,16 @@ pub fn rpm_arch(target: &Target) -> &'static str {
     }
 }
 
+/// Encode a version for the RPM Version header field. RPM reserves `-` as the
+/// version-release delimiter, so a semver prerelease like `1.2.3-beta.1` is
+/// rejected by the package builder; `~` is the RPM prerelease convention and
+/// sorts before the plain version, matching semver ordering. Header-only: the
+/// artifact filename keeps the verbatim configured version like every other
+/// format.
+pub fn rpm_version(version: &str) -> String {
+    version.replace('-', "~")
+}
+
 // ---------------------------------------------------------------------------
 // Rust API — used by the CLI crate
 // ---------------------------------------------------------------------------
@@ -2453,6 +2463,13 @@ binaries = { x86_64 = "my-app" }
     fn rpm_arch_mapping() {
         assert_eq!(rpm_arch(&Target::X86_64Linux), "x86_64");
         assert_eq!(rpm_arch(&Target::Aarch64Linux), "aarch64");
+    }
+
+    #[test]
+    fn rpm_version_prerelease_hyphen_becomes_tilde() {
+        assert_eq!(rpm_version("1.0.0"), "1.0.0");
+        assert_eq!(rpm_version("1.2.3-beta.1"), "1.2.3~beta.1");
+        assert_eq!(rpm_version("1.2.3-rc.1-hotfix"), "1.2.3~rc.1~hotfix");
     }
 
     // -----------------------------------------------------------------------
