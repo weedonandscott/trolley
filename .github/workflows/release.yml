@@ -75,7 +75,7 @@ jobs:
         if: runner.os == 'Windows'
 
   build-linux:
-    needs: validate
+    needs: [validate, test]
     strategy:
       matrix:
         include:
@@ -126,7 +126,7 @@ jobs:
           path: dist/trolley-*.tar.xz
 
   build-macos:
-    needs: validate
+    needs: [validate, test]
     strategy:
       matrix:
         include:
@@ -195,7 +195,7 @@ jobs:
           path: dist/trolley-*.tar.xz
 
   build-windows:
-    needs: validate
+    needs: [validate, test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
