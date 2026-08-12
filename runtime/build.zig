@@ -125,6 +125,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = platform.root_source_file.?,
         .target = target,
         .optimize = optimize,
+        // Debug info is 75% of the released Linux binary (126 MB -> 31 MB) and
+        // only buys panic traces. Effectively "not Windows", which keeps its
+        // own in a separate PDB; macOS returns at lib_only above.
+        .strip = os == .linux and optimize != .Debug,
     });
     exe_mod.link_libc = true;
     exe_mod.link_libcpp = true;

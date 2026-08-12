@@ -8,6 +8,16 @@ _zig-target target:
         *)               echo "{{ target }}" ;;
     esac
 
+# rustc's own defaults, pinned so a toolchain update can't move the floor
+# unnoticed. Not the runtime's `.macOS(.v13)` — that bounds the packaged app.
+_macos-deployment-target target:
+    #!/usr/bin/env bash
+    case "{{ target }}" in
+        x86_64-macos)    echo "10.12" ;;
+        aarch64-macos)   echo "11.0" ;;
+        *)               echo "" ;;
+    esac
+
 # Map trolley target to Rust CLI target triple.
 # Linux uses musl for a fully static, portable binary.
 _cli-target target:
@@ -249,6 +259,12 @@ release-cli *flags:
         echo "Error: --target is required" >&2; exit 1
     fi
 
+    # Exported, not just set: it has to reach the cc invocations of native
+    # dependencies, not only rustc.
+    if [[ "$target" == *-macos ]]; then
+        export MACOSX_DEPLOYMENT_TARGET="$(just _macos-deployment-target "$target")"
+    fi
+
     TROLLEY_RUNTIME_SOURCE="https://github.com/weedonandscott/trolley/releases/download/v{version}/trolley-runtime-{target}.tar.xz" \
         just build-cli --release --target "$target"
 
@@ -301,6 +317,50 @@ release-runtime *flags:
 # Build and package everything for release
 # Requires: --target <triple>
 release *flags: (release-cli flags) (release-runtime flags)
+
+# Assert the release binaries depend on nothing that only exists on the build
+# machine — such a dependency links and runs in CI and fails on every user's
+# machine. Run after release-cli / release-runtime; not part of `just release`.
+# Requires: --target <triple>; --cli / --runtime pick one, neither means both
+check-linkage *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=""
+    cli=""
+    runtime=""
+    next_is_target=""
+    for flag in {{ flags }}; do
+        if [ -n "$next_is_target" ]; then
+            target="$flag"
+            next_is_target=""
+            continue
+        fi
+        case "$flag" in
+            --target)  next_is_target=1 ;;
+            --cli)     cli=1 ;;
+            --runtime) runtime=1 ;;
+            *)         echo "Unknown flag: $flag" >&2; exit 1 ;;
+        esac
+    done
+    if [ -z "$target" ]; then
+        echo "Error: --target is required" >&2; exit 1
+    fi
+    if [ -z "$cli" ] && [ -z "$runtime" ]; then cli=1; runtime=1; fi
+
+    rust_target=$(just _cli-target "$target")
+    exe="trolley"; if [[ "$target" == *-windows ]]; then exe="trolley.exe"; fi
+    script="{{ justfile_directory() }}/scripts/check-linkage.sh"
+
+    if [ -n "$cli" ]; then
+        "$script" "$target" cli \
+            "{{ justfile_directory() }}/target/$rust_target/release/$exe" \
+            "$(just _macos-deployment-target "$target")"
+    fi
+    if [ -n "$runtime" ]; then
+        "$script" "$target" runtime \
+            "{{ justfile_directory() }}/runtime/zig-out-release/bin/$exe" \
+            ""
+    fi
 
 # Sanity-test the release artifacts: init a project, package all default
 # formats, diff dist/ against its committed listing snapshot
@@ -408,11 +468,13 @@ sanity-test *flags:
         # only proves filenames, not contents.
         icon_path="usr/share/icons/hicolor/256x256/apps/project.png"
         deb_arch="amd64"; if [ "$arch" = "aarch64" ]; then deb_arch="arm64"; fi
-        if ! dpkg-deb -c "$dist/project_0.1.0_${deb_arch}.deb" | grep -qF "$icon_path"; then
+        # Not grep -q: it exits at the first match, the producer dies of
+        # SIGPIPE, and pipefail turns that into a false failure.
+        if ! dpkg-deb -c "$dist/project_0.1.0_${deb_arch}.deb" | grep -F "$icon_path" >/dev/null; then
             echo "Error: deb is missing $icon_path" >&2
             exit 1
         fi
-        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -qF "/$icon_path"; then
+        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$icon_path" >/dev/null; then
             echo "Error: rpm is missing /$icon_path" >&2
             exit 1
         fi

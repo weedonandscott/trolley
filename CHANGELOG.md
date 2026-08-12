@@ -4,7 +4,28 @@
 
 ### Runtime
 
+- [linux] Strip debug info from release builds, cutting the binary from 126 MB
+        to 31 MB; in exchange a release panic prints no stack trace at all, and
+        the symbol table is gone for gdb and perf
+
 ### CLI
+
+- [macos] Fix release binaries linking Homebrew's `liblzma.dylib`, which is
+        absent on end-user machines: liblzma is now compiled into the CLI
+        (`xz2`'s `static` feature)
+- [macos] Pin the CLI's minimum macOS to rustc's own defaults per target (10.12
+        on x86_64, 11.0 on arm64) and assert it in CI, so a toolchain update
+        can't raise the floor unnoticed
+- [all] CI: new `just check-linkage --target <triple>` runs on every release
+        target and fails if the CLI depends on anything only the build machine
+        has
+- [all] CI: `check-linkage` now also checks the runtime (`--cli` / `--runtime`
+        select one, neither means both) and fails on a build-machine path in its
+        ELF interpreter or RPATH/RUNPATH, on a `DT_NEEDED` soname beyond a base
+        glibc system, on a Mach-O `LC_RPATH`, or on a `dlopen` path — which no
+        link metadata records
+- [all] CI: unit tests now run on macOS and Windows as well as Linux
+- [all] Test the `.tar.xz` decode the runtime download depends on
 
 ## 0.10.0
 

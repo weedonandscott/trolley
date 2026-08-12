@@ -925,7 +925,9 @@ impl Config {
             }
 
             let path = Path::new(shader_path);
-            if path.is_absolute() {
+            // has_root() too: on Windows `/tmp/x` is rooted but not absolute
+            // (that needs a `C:` prefix), and it is no more relative for it.
+            if path.is_absolute() || path.has_root() {
                 errors.push(format!("[embeds] shaders[{index}] must be relative"));
             }
             if path.components().any(|component| {
@@ -956,7 +958,9 @@ impl Config {
             }
 
             let path = Path::new(data_path);
-            if path.is_absolute() {
+            // has_root() too: on Windows `/tmp/x` is rooted but not absolute
+            // (that needs a `C:` prefix), and it is no more relative for it.
+            if path.is_absolute() || path.has_root() {
                 errors.push(format!("[embeds] data[{index}] must be relative"));
             }
             if path.components().any(|component| {
@@ -1193,7 +1197,9 @@ const WINDOWS_ICON_FILENAME: &CStr = c"app.ico";
 /// the packager to name and report the bundled icon. The Zig runtime reads the
 /// same name through [`trolley_windows_icon_filename`].
 pub fn windows_icon_filename_str() -> &'static str {
-    WINDOWS_ICON_FILENAME.to_str().expect("WINDOWS_ICON_FILENAME is ASCII")
+    WINDOWS_ICON_FILENAME
+        .to_str()
+        .expect("WINDOWS_ICON_FILENAME is ASCII")
 }
 
 /// C/Zig accessor: the bundled Windows icon filename as a NUL-terminated string.

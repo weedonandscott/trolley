@@ -603,6 +603,38 @@ fn resolve_runtime_from_path(path: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Decompress a `.tar.xz` stream and write every file entry into `dest_dir`,
+/// flattened to its basename.
+///
+/// Split out of [`resolve_runtime_from_url`] so a test can exercise the decode
+/// without a network fetch.
+fn extract_tar_xz_flat<R: Read>(reader: R, dest_dir: &Path) -> Result<()> {
+    let xz_reader = xz2::read::XzDecoder::new(reader);
+    let mut tar_archive = tar::Archive::new(xz_reader);
+
+    for entry in tar_archive.entries().context("reading tar entries")? {
+        let mut entry = entry.context("reading tar entry")?;
+        let path = entry.path().context("reading tar entry path")?.into_owned();
+        let file_name = match path.file_name() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        let dest = dest_dir.join(&file_name);
+        let mut out_file =
+            std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
+        io::copy(&mut entry, &mut out_file)
+            .with_context(|| format!("extracting {}", dest.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
     let cache_dir = runtime_cache_dir(target)?;
     let exe_name = runtime_exe_name(target);
@@ -629,28 +661,7 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
         .read_to_end(&mut archive_bytes)
         .with_context(|| format!("reading runtime response from {url}"))?;
 
-    let xz_reader = xz2::read::XzDecoder::new(io::Cursor::new(archive_bytes));
-    let mut tar_archive = tar::Archive::new(xz_reader);
-
-    for entry in tar_archive.entries().context("reading tar entries")? {
-        let mut entry = entry.context("reading tar entry")?;
-        let path = entry.path().context("reading tar entry path")?.into_owned();
-        let file_name = match path.file_name() {
-            Some(name) => name.to_owned(),
-            None => continue,
-        };
-        let dest = cache_dir.join(&file_name);
-        let mut out_file =
-            std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
-        io::copy(&mut entry, &mut out_file)
-            .with_context(|| format!("extracting {}", dest.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
+    extract_tar_xz_flat(io::Cursor::new(archive_bytes), &cache_dir)?;
 
     eprintln!("Runtime installed to {}", cache_dir.display());
 
@@ -1157,5 +1168,28 @@ mod tests {
         assert!(bundle_dir.path().join("config/defaults.json").exists());
         assert!(copied_files.contains(&PathBuf::from("assets/nested/info.txt")));
         assert!(copied_files.contains(&PathBuf::from("config/defaults.json")));
+    }
+
+    /// The only place liblzma actually decodes a stream: the sanity test points
+    /// `TROLLEY_RUNTIME_SOURCE` at a local binary, so nothing else reaches the
+    /// download-and-extract branch.
+    #[test]
+    fn extract_tar_xz_flat_decodes_a_real_xz_stream() {
+        const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/runtime.tar.xz");
+
+        let dir = tempfile::tempdir().unwrap();
+        extract_tar_xz_flat(io::Cursor::new(FIXTURE), dir.path()).unwrap();
+
+        let payload = std::fs::read_to_string(dir.path().join("trolley")).unwrap();
+        let expected = "trolley runtime payload line, repeated so the xz stream has something to compress\n".repeat(64);
+        assert_eq!(payload, expected);
+
+        // `nested/extra.txt` in the archive: every entry lands, flattened to
+        // its basename.
+        assert!(!dir.path().join("nested").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("extra.txt")).unwrap(),
+            "nested entry: extraction flattens this to its basename\n"
+        );
     }
 }
