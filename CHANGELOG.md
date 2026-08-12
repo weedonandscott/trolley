@@ -10,6 +10,18 @@
 
 ### CLI
 
+- [macos] Fix release binaries linking Homebrew's `liblzma.dylib`, which is
+        absent on end-user machines: liblzma is now compiled into the CLI
+        (`xz2`'s `static` feature)
+- [macos] Pin the CLI's minimum macOS to rustc's own defaults per target (10.12
+        on x86_64, 11.0 on arm64) and assert it in CI, so a toolchain update
+        can't raise the floor unnoticed
+- [all] CI: new `just check-linkage --target <triple>` runs on every release
+        target and fails if the CLI depends on anything only the build machine
+        has
+- [all] CI: unit tests now run on macOS and Windows as well as Linux
+- [all] Test the `.tar.xz` decode the runtime download depends on
+
 ## 0.10.0
 
 ### CLI

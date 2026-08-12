@@ -35,19 +35,44 @@ jobs:
           fi
           echo "version=$FILE_VERSION" >> "$GITHUB_OUTPUT"
 
+  # All three OSes: the suite has #[cfg(windows)]-gated tests that never even
+  # compile on a Linux-only runner.
   test:
     needs: validate
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Update Rust
         run: rustup update stable
-      - name: Install just
+      - name: Install just (Linux)
+        if: runner.os == 'Linux'
         run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+      - name: Install just (macOS)
+        if: runner.os == 'macOS'
+        run: brew install just
+      - name: Install just (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # MSYS2 provides cygpath (needed by just)
+          echo "C:\msys64\usr\bin" >> "$GITHUB_PATH"
+          cargo install just
+          # We ship -gnu, but the runner's host default is MSVC and `just test`
+          # pins no target — so pin it here and test the ABI we ship.
+          rustup target add x86_64-pc-windows-gnu
       - name: Run unit tests
+        shell: bash
         run: just test
+        if: runner.os != 'Windows'
+      - name: Run unit tests (Windows)
+        shell: bash
+        run: just test --target x86_64-pc-windows-gnu
+        if: runner.os == 'Windows'
 
   build-linux:
     needs: validate
@@ -86,6 +111,11 @@ jobs:
 
       - name: Build and package
         run: nix develop -L -v -c just release --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
+
+      # Outside the nix shell on purpose — the check must see the CLI the way a
+      # user's machine would, not through the build environment.
+      - name: Check linkage
+        run: just check-linkage --target ${{ matrix.target }}
 
       - name: Sanity test
         run: just sanity-test --target ${{ matrix.target }}
@@ -143,6 +173,11 @@ jobs:
       # system libraries instead of Nix store paths.
       - name: Build and package CLI
         run: just release-cli --target ${{ matrix.target }}
+
+      # Homebrew is installed on this runner, so a dylib picked up from it links
+      # and runs fine here and nowhere else.
+      - name: Check linkage
+        run: just check-linkage --target ${{ matrix.target }}
 
       - name: Build and package runtime
         run: nix develop ${{ matrix.nix_overrides }} -L -v -c just release-runtime --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
@@ -215,6 +250,12 @@ jobs:
           done
           echo "::error::Build failed after 3 attempts"
           exit 1
+
+      - name: Check linkage
+        shell: bash
+        run: |
+          # objdump comes from the runner's mingw-w64 binutils, not from rustup
+          PATH="/c/msys64/mingw64/bin:$PATH" just check-linkage --target x86_64-windows
 
       - name: Sanity test
         shell: bash

@@ -8,6 +8,16 @@ _zig-target target:
         *)               echo "{{ target }}" ;;
     esac
 
+# rustc's own defaults, pinned so a toolchain update can't move the floor
+# unnoticed. Not the runtime's `.macOS(.v13)` — that bounds the packaged app.
+_macos-deployment-target target:
+    #!/usr/bin/env bash
+    case "{{ target }}" in
+        x86_64-macos)    echo "10.12" ;;
+        aarch64-macos)   echo "11.0" ;;
+        *)               echo "" ;;
+    esac
+
 # Map trolley target to Rust CLI target triple.
 # Linux uses musl for a fully static, portable binary.
 _cli-target target:
@@ -249,6 +259,12 @@ release-cli *flags:
         echo "Error: --target is required" >&2; exit 1
     fi
 
+    # Exported, not just set: it has to reach the cc invocations of native
+    # dependencies, not only rustc.
+    if [[ "$target" == *-macos ]]; then
+        export MACOSX_DEPLOYMENT_TARGET="$(just _macos-deployment-target "$target")"
+    fi
+
     TROLLEY_RUNTIME_SOURCE="https://github.com/weedonandscott/trolley/releases/download/v{version}/trolley-runtime-{target}.tar.xz" \
         just build-cli --release --target "$target"
 
@@ -301,6 +317,38 @@ release-runtime *flags:
 # Build and package everything for release
 # Requires: --target <triple>
 release *flags: (release-cli flags) (release-runtime flags)
+
+# Assert the release CLI depends on nothing that only exists on the build
+# machine — such a dependency links and runs in CI and fails on every user's
+# machine. Run after release-cli.
+# Requires: --target <triple>
+check-linkage *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=""
+    next_is_target=""
+    for flag in {{ flags }}; do
+        if [ -n "$next_is_target" ]; then
+            target="$flag"
+            next_is_target=""
+            continue
+        fi
+        case "$flag" in
+            --target)  next_is_target=1 ;;
+            *)         echo "Unknown flag: $flag" >&2; exit 1 ;;
+        esac
+    done
+    if [ -z "$target" ]; then
+        echo "Error: --target is required" >&2; exit 1
+    fi
+
+    rust_target=$(just _cli-target "$target")
+    exe="trolley"; if [[ "$target" == *-windows ]]; then exe="trolley.exe"; fi
+
+    "{{ justfile_directory() }}/scripts/check-linkage.sh" \
+        "$target" \
+        "{{ justfile_directory() }}/target/$rust_target/release/$exe" \
+        "$(just _macos-deployment-target "$target")"
 
 # Sanity-test the release artifacts: init a project, package all default
 # formats, diff dist/ against its committed listing snapshot

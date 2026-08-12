@@ -2,3 +2,7 @@
 # generates at run time. Keep LF in the working tree so the Windows runner's
 # autocrlf checkout doesn't add CR to every expected line.
 tests/sanity/listings/*.list text eol=lf
+
+# Fixture for the xz round-trip unit test, which now runs on the Windows
+# runner too: autocrlf would rewrite bytes inside the stream and fail the decode.
+cli/tests/fixtures/*.tar.xz binary
