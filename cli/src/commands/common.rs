@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use trolley_config::{Config, ENVIRONMENT_DEFAULTS, FontFamily, Target};
@@ -344,18 +344,32 @@ pub fn copy_fonts_to_bundle(font_files: &[PathBuf], output_dir: &Path) -> Result
 
 /// Anchor a project-relative glob pattern to the project dir, escaping glob
 /// metacharacters in the directory prefix so a path like `.../app [beta]/`
-/// doesn't silently match nothing. Absolute patterns are returned unchanged
-/// (preserving the current `Path::join` semantics).
+/// doesn't silently match nothing.
+///
+/// The prefix and root separator are carried over unescaped: glob strips them
+/// before parsing anyway, and escaping them is destructive — `\\?\C:\...`,
+/// which `canonicalize` returns on Windows, stops being a verbatim prefix once
+/// its `?` becomes `[?]`, and glob reads it as a UNC share that cannot exist.
+///
+/// Pre-existing gaps, not fixed here: glob carries only `\\?\C:\`, so a project
+/// on `\\?\UNC\...` or `\\?\Volume{...}\` still matches nothing, and a rooted
+/// but driveless pattern (`\assets\*.ico`) is not absolute, so `push` drops the
+/// anchor — as `Path::join` did before 0.10.0.
 pub(crate) fn anchored_glob_pattern(project_dir: &Path, pattern: &str) -> String {
     if Path::new(pattern).is_absolute() {
         return pattern.to_string();
     }
-    format!(
-        "{}{}{}",
-        glob::Pattern::escape(&project_dir.to_string_lossy()),
-        std::path::MAIN_SEPARATOR,
-        pattern
-    )
+    let mut anchored = PathBuf::new();
+    for component in project_dir.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => anchored.push(component.as_os_str()),
+            _ => anchored.push(glob::Pattern::escape(
+                &component.as_os_str().to_string_lossy(),
+            )),
+        }
+    }
+    anchored.push(pattern);
+    anchored.to_string_lossy().into_owned()
 }
 
 /// Resolve the first Windows `.ico` declared by `[app].icons`.
@@ -929,6 +943,30 @@ mod tests {
         std::fs::write(project_dir.join("icon.ico"), b"ico").unwrap();
 
         let pattern = anchored_glob_pattern(&project_dir, "*.ico");
+        let matches: Vec<_> = glob::glob(&pattern)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(matches, vec![project_dir.join("icon.ico")]);
+    }
+
+    /// Escaping the `?` in the `\\?\C:\` prefix `canonicalize` returns turns it
+    /// into a nonexistent UNC share, and every icon glob silently matches
+    /// nothing.
+    #[cfg(windows)]
+    #[test]
+    fn anchored_glob_pattern_keeps_verbatim_prefix_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().canonicalize().unwrap();
+        assert!(
+            project_dir.to_string_lossy().starts_with(r"\\?\"),
+            "canonicalize should produce a verbatim path: {}",
+            project_dir.display()
+        );
+        std::fs::write(project_dir.join("icon.ico"), b"ico").unwrap();
+
+        let pattern = anchored_glob_pattern(&project_dir, "*.ico");
+        assert!(!pattern.contains("[?]"), "prefix was escaped: {pattern}");
         let matches: Vec<_> = glob::glob(&pattern)
             .unwrap()
             .collect::<Result<_, _>>()
