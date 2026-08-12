@@ -24,7 +24,9 @@ ttf-parser = "0.25"
 flate2 = "1"
 rpm = { version = "0.25", default-features = false, features = ["payload", "gzip-compression"] }
 png = "0.18"
-glob = "0.3"
+# 0.3.2 floor, measured: 0.3.0 and 0.3.1 match nothing under a `\\?\C:\` root,
+# which is what canonicalize returns on Windows, so icon globs silently fail.
+glob = "0.3.2"
 cargo-packager = { version = "0.11.8", default-features = false, features = ["rustls-tls"] }
 
 

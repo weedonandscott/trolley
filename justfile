@@ -431,15 +431,18 @@ sanity-test *flags:
     arch="${target%%-*}"
     if [[ "$target" == *-linux ]]; then
         # AppImage requires a square icon; give the init project one.
-        base64 -d > "$test_dir/project/icon.png" <<'ICON'
-    iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDolAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURWYzmf///129H+IAAAABYktHRAH/Ai3eAAAAH0lEQVRo3u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAvg0hAAABfxmcpwAAAABJRU5ErkJggg==
-    ICON
+        cp "{{ justfile_directory() }}/tests/sanity/icon.png" "$test_dir/project/icon.png"
         sed -i '/^\[app\]$/a icons = ["icon.png"]' "$test_dir/project/trolley.toml"
         # CI runners have no FUSE; tell linuxdeploy to self-extract instead
         export APPIMAGE_EXTRACT_AND_RUN=1
+    elif [[ "$target" == *-windows ]]; then
+        # Must be a real .ico: parse_ico validates the header, and the icon
+        # assertions below need an image Windows can actually draw.
+        cp "{{ justfile_directory() }}/tests/sanity/icon.ico" "$test_dir/project/icon.ico"
+        sed -i '/^\[app\]$/a icons = ["icon.ico"]' "$test_dir/project/trolley.toml"
     fi
     TROLLEY_RUNTIME_SOURCE="$runtime" \
-        "$cli" package --config "$test_dir/project/trolley.toml"
+        "$cli" package --config "$test_dir/project/trolley.toml" | tee "$test_dir/package.log"
 
     dist="$test_dir/project/trolley/build/com.example.project/$target/dist"
     snap="{{ justfile_directory() }}/tests/sanity/listings/${target}.list"
@@ -481,6 +484,45 @@ sanity-test *flags:
         (cd "$test_dir" && "$dist/Project_Sanity_0.1.0_${arch}.AppImage" --appimage-extract "$icon_path" >/dev/null)
         if [ ! -f "$test_dir/squashfs-root/$icon_path" ]; then
             echo "Error: AppImage is missing $icon_path" >&2
+            exit 1
+        fi
+    fi
+    if [[ "$target" == *-windows ]]; then
+        bundle="$test_dir/project/trolley/build/com.example.project/$target/bundle"
+
+        # Two independent icon paths, neither covered by the listing diff:
+        # app.ico, which the runtime loads for its window icon, and the exe's
+        # embedded resource.
+        if [ ! -f "$bundle/app.ico" ]; then
+            echo "Error: bundle is missing app.ico (icon glob resolved nothing)" >&2
+            exit 1
+        fi
+        if ! grep -F "(Windows exe icon stamped)" "$test_dir/package.log" >/dev/null; then
+            echo "Error: packager did not report stamping the exe icon" >&2
+            exit 1
+        fi
+
+        # Shortcuts use the embedded resource, so ask Windows to count it:
+        # PrivateExtractIcons with a null buffer and nIcons 0 returns the count,
+        # and zero sizes stop it filtering. Run from $bundle with relative paths
+        # — MSYS rewrites Unix-looking arguments before PowerShell sees them.
+        cat > "$bundle/icon-count.ps1" <<'PS1'
+    $sig = '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int PrivateExtractIcons(string f, int i, int cx, int cy, IntPtr[] h, int[] id, int n, int flags);'
+    Add-Type -Namespace Trolley -Name Ico -MemberDefinition $sig
+    [Trolley.Ico]::PrivateExtractIcons((Resolve-Path $args[0]).Path, 0, 0, 0, $null, $null, 0, 0)
+    PS1
+        # `|| true` so a throwing Add-Type cannot kill the recipe here under
+        # `set -e`, before the message below says what happened. stderr goes to a
+        # file rather than into $icons: PowerShell emits a CLIXML progress record
+        # there on a machine's first Add-Type, which would fail the digit check.
+        icon_err="$test_dir/icon-count.err"
+        icons=$(cd "$bundle" && powershell -NoProfile -ExecutionPolicy Bypass -File icon-count.ps1 project_runtime.exe 2>"$icon_err" | tr -d '[:space:]') || true
+        rm "$bundle/icon-count.ps1"
+        # Match on digits first: `[ non-numeric -lt 1 ]` exits 2, which `if`
+        # reads as false and would pass the assertion on garbled output.
+        if ! [[ "$icons" =~ ^[0-9]+$ ]] || [ "$icons" -lt 1 ]; then
+            echo "Error: project_runtime.exe has no embedded icon (PrivateExtractIcons returned '${icons}')" >&2
+            if [ -s "$icon_err" ]; then sed 's/^/  /' "$icon_err" >&2; fi
             exit 1
         fi
     fi

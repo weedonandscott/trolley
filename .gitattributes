@@ -3,6 +3,11 @@
 # autocrlf checkout doesn't add CR to every expected line.
 tests/sanity/listings/*.list text eol=lf
 
+# Icon fixtures the sanity test packages with: an autocrlf checkout would
+# corrupt the image bytes on the Windows runner.
+tests/sanity/icon.ico binary
+tests/sanity/icon.png binary
+
 # Fixture for the xz round-trip unit test, which now runs on the Windows
 # runner too: autocrlf would rewrite bytes inside the stream and fail the decode.
 cli/tests/fixtures/*.tar.xz binary

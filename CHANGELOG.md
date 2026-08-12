@@ -10,6 +10,10 @@
 
 ### CLI
 
+- [windows] Fix icon globs silently matching nothing since 0.10.0, which left
+        desktop, Start menu and taskbar shortcuts on the generic icon
+- [windows] Sanity test now packages with an icon and asserts both `app.ico` in
+        the bundle and a non-zero icon count on the stamped runtime exe
 - [macos] Fix release binaries linking Homebrew's `liblzma.dylib`, which is
         absent on end-user machines: liblzma is now compiled into the CLI
         (`xz2`'s `static` feature)
