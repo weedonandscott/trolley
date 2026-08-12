@@ -318,14 +318,16 @@ release-runtime *flags:
 # Requires: --target <triple>
 release *flags: (release-cli flags) (release-runtime flags)
 
-# Assert the release CLI depends on nothing that only exists on the build
+# Assert the release binaries depend on nothing that only exists on the build
 # machine — such a dependency links and runs in CI and fails on every user's
-# machine. Run after release-cli.
-# Requires: --target <triple>
+# machine. Run after release-cli / release-runtime; not part of `just release`.
+# Requires: --target <triple>; --cli / --runtime pick one, neither means both
 check-linkage *flags:
     #!/usr/bin/env bash
     set -euo pipefail
     target=""
+    cli=""
+    runtime=""
     next_is_target=""
     for flag in {{ flags }}; do
         if [ -n "$next_is_target" ]; then
@@ -335,20 +337,30 @@ check-linkage *flags:
         fi
         case "$flag" in
             --target)  next_is_target=1 ;;
+            --cli)     cli=1 ;;
+            --runtime) runtime=1 ;;
             *)         echo "Unknown flag: $flag" >&2; exit 1 ;;
         esac
     done
     if [ -z "$target" ]; then
         echo "Error: --target is required" >&2; exit 1
     fi
+    if [ -z "$cli" ] && [ -z "$runtime" ]; then cli=1; runtime=1; fi
 
     rust_target=$(just _cli-target "$target")
     exe="trolley"; if [[ "$target" == *-windows ]]; then exe="trolley.exe"; fi
+    script="{{ justfile_directory() }}/scripts/check-linkage.sh"
 
-    "{{ justfile_directory() }}/scripts/check-linkage.sh" \
-        "$target" \
-        "{{ justfile_directory() }}/target/$rust_target/release/$exe" \
-        "$(just _macos-deployment-target "$target")"
+    if [ -n "$cli" ]; then
+        "$script" "$target" cli \
+            "{{ justfile_directory() }}/target/$rust_target/release/$exe" \
+            "$(just _macos-deployment-target "$target")"
+    fi
+    if [ -n "$runtime" ]; then
+        "$script" "$target" runtime \
+            "{{ justfile_directory() }}/runtime/zig-out-release/bin/$exe" \
+            ""
+    fi
 
 # Sanity-test the release artifacts: init a project, package all default
 # formats, diff dist/ against its committed listing snapshot

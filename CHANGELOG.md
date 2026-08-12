@@ -19,6 +19,11 @@
 - [all] CI: new `just check-linkage --target <triple>` runs on every release
         target and fails if the CLI depends on anything only the build machine
         has
+- [all] CI: `check-linkage` now also checks the runtime (`--cli` / `--runtime`
+        select one, neither means both) and fails on a build-machine path in its
+        ELF interpreter or RPATH/RUNPATH, on a `DT_NEEDED` soname beyond a base
+        glibc system, on a Mach-O `LC_RPATH`, or on a `dlopen` path — which no
+        link metadata records
 - [all] CI: unit tests now run on macOS and Windows as well as Linux
 - [all] Test the `.tar.xz` decode the runtime download depends on
 

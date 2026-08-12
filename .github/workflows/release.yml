@@ -112,8 +112,8 @@ jobs:
       - name: Build and package
         run: nix develop -L -v -c just release --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
 
-      # Outside the nix shell on purpose — the check must see the CLI the way a
-      # user's machine would, not through the build environment.
+      # Outside the nix shell on purpose — the check must see the binaries the
+      # way a user's machine would, not through the build environment.
       - name: Check linkage
         run: just check-linkage --target ${{ matrix.target }}
 
@@ -176,11 +176,15 @@ jobs:
 
       # Homebrew is installed on this runner, so a dylib picked up from it links
       # and runs fine here and nowhere else.
-      - name: Check linkage
-        run: just check-linkage --target ${{ matrix.target }}
+      - name: Check linkage (CLI)
+        run: just check-linkage --target ${{ matrix.target }} --cli
 
       - name: Build and package runtime
         run: nix develop ${{ matrix.nix_overrides }} -L -v -c just release-runtime --target ${{ matrix.target }} --system ${{ steps.deps.outputs.deps }}
+
+      # Outside nix on purpose: the nix shell may not provide otool/vtool.
+      - name: Check linkage (runtime)
+        run: just check-linkage --target ${{ matrix.target }} --runtime
 
       - name: Sanity test
         run: just sanity-test --target ${{ matrix.target }}
