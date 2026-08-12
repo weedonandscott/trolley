@@ -468,11 +468,13 @@ sanity-test *flags:
         # only proves filenames, not contents.
         icon_path="usr/share/icons/hicolor/256x256/apps/project.png"
         deb_arch="amd64"; if [ "$arch" = "aarch64" ]; then deb_arch="arm64"; fi
-        if ! dpkg-deb -c "$dist/project_0.1.0_${deb_arch}.deb" | grep -qF "$icon_path"; then
+        # Not grep -q: it exits at the first match, the producer dies of
+        # SIGPIPE, and pipefail turns that into a false failure.
+        if ! dpkg-deb -c "$dist/project_0.1.0_${deb_arch}.deb" | grep -F "$icon_path" >/dev/null; then
             echo "Error: deb is missing $icon_path" >&2
             exit 1
         fi
-        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -qF "/$icon_path"; then
+        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$icon_path" >/dev/null; then
             echo "Error: rpm is missing /$icon_path" >&2
             exit 1
         fi
