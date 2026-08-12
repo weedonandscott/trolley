@@ -4,6 +4,10 @@
 
 ### Runtime
 
+- [linux] Strip debug info from release builds, cutting the binary from 126 MB
+        to 31 MB; in exchange a release panic prints no stack trace at all, and
+        the symbol table is gone for gdb and perf
+
 ### CLI
 
 ## 0.10.0
