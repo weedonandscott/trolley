@@ -16,3 +16,14 @@ cli/tests/fixtures/*.tar.xz binary
 # config. An autocrlf checkout would bake CRLF into the binary itself, so the
 # line endings a user gets would depend on which OS built their trolley.
 cli/src/commands/*.conf text eol=lf
+
+# Every vendored file is hashed against its manifest, so all of them have to
+# survive a checkout byte-for-byte: a rewritten byte inside a PE image is a
+# corrupt binary, and a text one's CRLF would not survive being re-added on a
+# machine that normalizes line endings.
+runtime/vendor/** binary
+
+# Not hashed, and worth reading in a diff. Last match wins, and `binary` is a
+# macro for three attributes, so undoing it takes all three.
+runtime/vendor/README.md text diff merge eol=lf
+runtime/vendor/**/vendor.json text diff merge eol=lf

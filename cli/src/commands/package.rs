@@ -134,6 +134,29 @@ pub fn run(
         .with_context(|| format!("copying runtime to {}", bundle_dir.display()))?;
     fs::copy(&tui_binary, bundle_dir.join(&manifest.core_name))
         .with_context(|| format!("copying TUI binary to {}", bundle_dir.display()))?;
+    if target.is_windows() {
+        // The console host travels with the runtime, so it sits wherever the
+        // runtime was resolved from. A bare relative path yields Some(""), which
+        // would resolve against the CWD.
+        let runtime_dir = match runtime.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        for name in common::WINDOWS_CONSOLE_HOST_FILENAMES {
+            let src = runtime_dir.join(name);
+            if !src.exists() {
+                bail!(
+                    "{name} is missing from {}, which should hold the runtime and the \
+                     console host that ships with it. Rebuild a local runtime with \
+                     `just build-runtime`; a runtime from an older trolley release \
+                     predates the console host, so use one matching this CLI.",
+                    runtime_dir.display()
+                );
+            }
+            fs::copy(&src, bundle_dir.join(name))
+                .with_context(|| format!("copying {name} to {}", bundle_dir.display()))?;
+        }
+    }
     let stamped_runtime_icon = if target.is_windows() && let Some(icon_path) = &windows_icon {
         super::windows_exe_icon::stamp_exe_icon(&bundled_runtime, icon_path).with_context(|| {
             format!(
@@ -192,6 +215,11 @@ pub fn run(
     println!("  ghostty.conf  (terminal config)");
     println!("  environment  (environment variables)");
     println!("  trolley.toml  (manifest)");
+    if target.is_windows() {
+        for name in common::WINDOWS_CONSOLE_HOST_FILENAMES {
+            println!("  {name}  (bundled console host)");
+        }
+    }
     if let common::BundleVariant::Linux {
         ref wrapper_name, ..
     } = manifest.variant

@@ -227,6 +227,17 @@ jobs:
           rustup target add x86_64-pc-windows-gnu
           # MSYS2 provides cygpath (needed by just) and xz (needed by tar -J)
           echo "C:\msys64\usr\bin" >> "$GITHUB_PATH"
+          # jq reads the vendor manifests, and it has to be MSYS2's: the image
+          # also ships a native jq.exe, which writes CRLF and corrupts every
+          # filename the manifests yield. The PATH line above puts MSYS2 first,
+          # so once this exists it wins.
+          #
+          # The test is for that exact binary, not `command -v jq`, which the
+          # native one satisfies. `-Sy` without `-u` is a partial upgrade, so it
+          # is skipped whenever MSYS2 already has jq. Spelled /c/..., not C:\...:
+          # a word with no forward slash is a command name to bash, not a path.
+          [ -x /c/msys64/usr/bin/jq.exe ] \
+            || /c/msys64/usr/bin/pacman -Sy --noconfirm --needed jq
           cargo install just
 
       - name: Cache Zig dependencies
@@ -236,6 +247,12 @@ jobs:
           key: zig-cache-windows-${{ hashFiles('runtime/build.zig.zon', 'ghostty/build.zig.zon', 'ghostty/pkg/dcimgui/build.zig.zon') }}
           restore-keys: |
             zig-cache-windows-
+
+      # Outside the retry below: a hash mismatch is a real fault, and retrying
+      # it twice only buries the message.
+      - name: Verify vendored files
+        shell: bash
+        run: just verify-vendored
 
       - name: Build and package
         shell: bash

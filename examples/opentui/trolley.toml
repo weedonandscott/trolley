@@ -10,6 +10,9 @@ binaries = { x86_64 = "bin/opentui" }
 [macos]
 binaries = { aarch64 = "bin/opentui", x86_64 = "bin/opentui" }
 
+[windows]
+binaries = { x86_64 = "bin/opentui.exe" }
+
 [gui]
 initial_width = 700
 initial_height = 500
