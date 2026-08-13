@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
 ### Runtime
 
@@ -36,6 +36,11 @@
         link metadata records
 - [all] CI: unit tests now run on macOS and Windows as well as Linux
 - [all] Test the `.tar.xz` decode the runtime download depends on
+- [all] Update Rust dependencies for security advisories (#47): `tar` 0.4.46
+        fixes CVE-2026-33056 and CVE-2026-33055, both reachable when unpacking a
+        downloaded runtime tarball; `rustls-webpki` 0.103.14 fixes four
+        certificate-chain-validation advisories, two of them name-constraint
+        bypasses on the path used for every HTTPS download
 
 ## 0.10.0
 
