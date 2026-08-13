@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("common");
+const vendored = @import("vendored");
 const win32 = @import("win32");
 const ghostty = @cImport(@cInclude("ghostty.h"));
 const trolley = @cImport(@cInclude("trolley.h"));
@@ -1097,6 +1098,76 @@ fn createModernGLContext(hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
 }
 
 // ---------------------------------------------------------------------------
+// Vendored files
+// ---------------------------------------------------------------------------
+
+/// conpty.dll falls back to the older OS console host without a word when
+/// OpenConsole.exe isn't beside it, so an incomplete package would silently
+/// lose the fixes. Fail loudly instead.
+///
+/// The contents are checked too, not just the names: these are loaded into our
+/// process, and whatever vouches for this executable rarely covers them. The
+/// list comes from vendor/<target>/vendor.json via the build.
+fn checkVendoredFiles() void {
+    for (vendored.verified) |entry| {
+        const want = entry.sha256;
+        const path = common.getBundledPath(entry.name) orelse
+            fatal("Cannot locate the application directory.", .{});
+        defer std.heap.page_allocator.free(path);
+
+        const file = std.fs.openFileAbsoluteZ(path, .{}) catch fatal(
+            "The application is missing a required file:\n\n{s}\n\n" ++
+                "The installation is incomplete or the file was removed " ++
+                "(some antivirus software quarantines it). Reinstall the application.",
+            .{path},
+        );
+        defer file.close();
+
+        const contents = file.readToEndAlloc(
+            std.heap.page_allocator,
+            16 * 1024 * 1024,
+        ) catch fatal(
+            "The application cannot read a required file:\n\n{s}\n\n" ++
+                "The installation is incomplete or the file was removed " ++
+                "(some antivirus software quarantines it). Reinstall the application.",
+            .{path},
+        );
+        defer std.heap.page_allocator.free(contents);
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(contents, &digest, .{});
+        const got = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &got, want)) fatal(
+            "A required file does not match the one shipped with this " ++
+                "application:\n\n{s}\n\nIt has been modified or replaced. " ++
+                "Reinstall the application.",
+            .{path},
+        );
+    }
+}
+
+/// Report a fatal startup problem and exit. GUI subsystem, so a message box is
+/// the only thing the user can see.
+fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
+    const alloc = std.heap.page_allocator;
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("Trolley");
+    const msg: []const u8 = std.fmt.allocPrint(alloc, fmt, args) catch
+        "The application cannot start.";
+    // A path that isn't valid UTF-8 would otherwise exit with no window and no
+    // reason, which is the one thing this function exists to prevent.
+    const msg_w: [:0]const u16 = std.unicode.utf8ToUtf16LeAllocZ(alloc, msg) catch
+        std.unicode.utf8ToUtf16LeStringLiteral("The application cannot start.");
+    // No window of ours exists yet, so without these the box can open behind
+    // whatever launched us — indistinguishable from exiting silently.
+    _ = wam.MessageBoxW(null, msg_w.ptr, title, .{
+        .ICONHAND = 1,
+        .SETFOREGROUND = 1,
+        .TOPMOST = 1,
+    });
+    std.process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 pub fn main() !void {
@@ -1113,6 +1184,8 @@ pub fn main() !void {
 
     // -- Change CWD to the exe's directory --
     common.chdirToExeDir();
+
+    checkVendoredFiles();
 
     // -- Load manifest for window config --
     if (common.getBundledPath("trolley.toml")) |manifest_path| {

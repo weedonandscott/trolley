@@ -126,6 +126,12 @@
             # Task runner
             just
 
+            # Reads runtime/vendor/*/vendor.json; `just release` verifies the
+            # vendored files on every target, so this is a build input, not a
+            # convenience. It resolved from the ambient PATH before it was
+            # declared here, which hid the omission on machines that had it.
+            jq
+
             # CI
             act
             zon2nixPkg

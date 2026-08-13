@@ -7,6 +7,12 @@
 - [linux] Strip debug info from release builds, cutting the binary from 126 MB
         to 31 MB; in exchange a release panic prints no stack trace at all, and
         the symbol table is gone for gdb and perf
+- [windows] Ship Microsoft's redistributable console host (`conpty.dll` +
+        `OpenConsole.exe`, `Microsoft.Windows.Console.ConPTY` 1.24.260710001) in
+        place of the OS one, fixing `ctrl+shift+<letter>` and key releases being
+        dropped on console hosts older than Windows Terminal 1.22
+- [windows] Refuse to start, with a message box, when `conpty.dll` or
+        `OpenConsole.exe` is missing from the install directory
 
 ### CLI
 

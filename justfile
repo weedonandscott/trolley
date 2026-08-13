@@ -1,3 +1,31 @@
+# Names the files a target vendors, one per line, from its manifest. The
+# manifest is the only place that list lives; see runtime/vendor/README.md.
+_vendored-files target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest="{{ justfile_directory() }}/runtime/vendor/{{ target }}/vendor.json"
+    [ -f "$manifest" ] || exit 0
+    just _require-jq
+    # keys_unsorted keeps the manifest's own order, so this output reads the
+    # same way the file does.
+    #
+    # tr -d '\r': a native Windows jq.exe writes stdout in text mode, so every
+    # line arrives with a trailing CR, and callers put these straight into
+    # filenames — `tar: conpty.dll\r: Cannot stat`. Stopgap. The real fix is
+    # jq's --raw-output0, which emits no newline for text mode to translate.
+    # Safe to strip unconditionally: names are validated to [A-Za-z0-9._+-].
+    jq -r '.files | keys_unsorted[]' "$manifest" | tr -d '\r'
+
+# The manifests are read by the build (real JSON) and by these recipes. Parsing
+# them by hand here would agree with the build only for one exact formatting.
+_require-jq:
+    #!/usr/bin/env bash
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: jq is required to read the vendor manifests" >&2
+        echo "  Debian/Ubuntu: apt install jq   macOS: brew install jq   MSYS2: pacman -S jq" >&2
+        exit 1
+    fi
+
 # Map trolley target to Zig target triple
 # Linux needs explicit -gnu suffix; without it Zig defaults to musl.
 _zig-target target:
@@ -307,12 +335,38 @@ release-runtime *flags:
 
     build_flags="--release --target $target"
     if [ -n "$system" ]; then build_flags="$build_flags --system $system"; fi
+    # Prove the vendored files are what their manifest says before they go into
+    # a release artifact.
+    just verify-vendored
+
     just build-runtime $build_flags
 
     exe="trolley"; if [[ "$target" == *-windows ]]; then exe="trolley.exe"; fi
+    files=("$exe")
+    # Whatever this target vendors travels with it; the build installed these
+    # beside the exe. See runtime/vendor/README.md.
+    #
+    # Captured rather than piped in as `done < <(...)`: that form ends the loop
+    # without bash ever seeing the producer's exit status, so a failure here
+    # would tar up the exe alone and the check below would then confirm that
+    # shortened list.
+    vendored=$(just _vendored-files "$target")
+    while IFS= read -r name; do
+        [ -n "$name" ] && files+=("$name")
+    done <<< "$vendored"
     mkdir -p dist
-    tar cJf "dist/trolley-runtime-${target}.tar.xz" \
-        -C "runtime/zig-out-release/bin" "$exe"
+    tarball="dist/trolley-runtime-${target}.tar.xz"
+    tar cJf "$tarball" -C "runtime/zig-out-release/bin" "${files[@]}"
+
+    # Nothing downstream unpacks this tarball until a user does, so prove every
+    # file is in it here. The CLI hard-fails on a runtime missing any of them.
+    listing=$(tar tf "$tarball")
+    for f in "${files[@]}"; do
+        if ! printf '%s\n' "$listing" | grep -qxF "$f"; then
+            echo "Error: $tarball is missing $f" >&2
+            exit 1
+        fi
+    done
 
 # Build and package everything for release
 # Requires: --target <triple>
@@ -525,6 +579,41 @@ sanity-test *flags:
             if [ -s "$icon_err" ]; then sed 's/^/  /' "$icon_err" >&2; fi
             exit 1
         fi
+
+        # The runtime refuses to start without the files it vendors, and the
+        # dist listing can't see inside the bundle, so check it here.
+        vendored_files=$(just _vendored-files "$target")
+        # Read by line, not by word: a name may contain a space.
+        while IFS= read -r vendored_file; do
+            [ -n "$vendored_file" ] || continue
+            if [ ! -f "$bundle/$vendored_file" ]; then
+                echo "Error: bundle is missing $vendored_file (vendored file)" >&2
+                exit 1
+            fi
+        done <<< "$vendored_files"
+
+        # The installer ships only what the manifest declares, by a different
+        # mechanism than the archive — the listing diff only proves filenames,
+        # not contents. A drop here is a hard startup failure for every user.
+        setup="$dist/Project_Sanity_0.1.0_${arch}-setup.exe"
+        # 7-Zip ships with Windows runners but is not on the MSYS PATH there.
+        sevenzip=""
+        for candidate in 7z "/c/Program Files/7-Zip/7z.exe" "/c/Program Files (x86)/7-Zip/7z.exe"; do
+            if command -v "$candidate" >/dev/null 2>&1; then sevenzip="$candidate"; break; fi
+        done
+        if [ -z "$sevenzip" ]; then
+            echo "Error: 7z not found; cannot verify the contents of $setup" >&2
+            echo "Install 7-Zip, or put its directory on PATH." >&2
+            exit 1
+        fi
+        setup_listing=$("$sevenzip" l -ba "$setup")
+        while IFS= read -r vendored_file; do
+            [ -n "$vendored_file" ] || continue
+            if ! printf '%s\n' "$setup_listing" | grep -qF "$vendored_file"; then
+                echo "Error: installer is missing $vendored_file (vendored file)" >&2
+                exit 1
+            fi
+        done <<< "$vendored_files"
     fi
 
     echo "==> Sanity test passed"
@@ -571,6 +660,144 @@ build-deps:
     git add -f nix/ghostty-deps.nix nix/extra-zig-deps.nix
     nix build -L -v .#deps
     readlink ./result
+
+# Re-hash every vendored file against its target's manifest
+verify-vendored:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Catches a corrupted or hand-edited file. It cannot prove the bytes came
+    # from upstream: a manifest is written by whoever vendored the files.
+    vendor="{{ justfile_directory() }}/runtime/vendor"
+    sha256=$(just _sha256-cmd)
+    just _require-jq
+    checked=0
+
+    # Same source in more than one target has to mean the same bytes; recorded
+    # here as we go so the licence copies cannot drift apart unnoticed.
+    seen_from=""
+
+    # Every target that vendors anything, so a newly added one is covered
+    # without touching this recipe.
+    for manifest in "$vendor"/*/vendor.json; do
+        [ -e "$manifest" ] || continue
+        target=$(basename "$(dirname "$manifest")")
+
+        # A target directory that lists nothing would otherwise be walked over
+        # in silence, since the totals below are only checked across all targets.
+        listed=$(jq -r '.files | length' "$manifest")
+        if [ "$listed" -eq 0 ]; then
+            echo "Error: $target/vendor.json lists no files" >&2
+            exit 1
+        fi
+
+        # One pass over the manifest, parsed as JSON rather than scraped, so
+        # this agrees with the build for any formatting of the file.
+        # Unit separator, not tab: bash folds runs of tabs into one delimiter,
+        # so an absent field would shift every later one along.
+        #
+        # Read in full before checking anything. Fed straight into the loop as
+        # `done < <(jq ...)`, a jq that dies partway just ends the loop, bash
+        # never sees its status, and a half-read manifest reports OK. As an
+        # assignment it is `set -e`'s to catch.
+        records=$(jq -r '.files | to_entries[] | [
+                      .key,
+                      (.value.sha256 // ""),
+                      ((.value.size // "") | tostring),
+                      (.value.from // "")
+                  ] | join("\u001f")' "$manifest" | tr -d '\r')
+
+        target_checked=0
+        while IFS=$'\037' read -r name expected expected_size from; do
+            [ -n "$name" ] || continue
+            # Lowercased: tools differ on the case they print a digest in.
+            expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
+            if [ -z "$expected" ]; then
+                echo "Error: $target/vendor.json records no sha256 for $name" >&2
+                exit 1
+            fi
+            if [ ! -f "$vendor/$target/$name" ]; then
+                echo "Error: $target/vendor.json lists $name, which is not there" >&2
+                exit 1
+            fi
+            # Redirected, not named: a path holding a backslash makes GNU
+            # coreutils escape the filename and prefix the whole line with one.
+            actual=$($sha256 < "$vendor/$target/$name" | cut -d' ' -f1 | tr 'A-F' 'a-f')
+            if [ "$actual" != "$expected" ]; then
+                echo "Error: $target/$name does not match its manifest" >&2
+                echo "  recorded: $expected" >&2
+                echo "  actual:   $actual" >&2
+                exit 1
+            fi
+
+            # Recorded size is otherwise decorative; nothing else reads it.
+            if [ -n "$expected_size" ]; then
+                actual_size=$(wc -c < "$vendor/$target/$name" | tr -d ' ')
+                if [ "$actual_size" != "$expected_size" ]; then
+                    echo "Error: $target/$name is $actual_size bytes, manifest says $expected_size" >&2
+                    exit 1
+                fi
+            fi
+
+            if [ -n "$from" ]; then
+                # grep -F and a real tab, not sed: `\t` in a BRE is a GNU
+                # extension that BSD sed matches as a literal `t`, so on a Mac
+                # outside the nix shell this lookup never fired and the check
+                # passed vacuously. -F also keeps a `from` with a regex
+                # metacharacter in it from changing what matches.
+                # `|| true` because no prior record is the normal case for the
+                # first target, and grep exits 1 on no match, which pipefail
+                # would otherwise turn into a silent recipe failure.
+                prior=$(printf '%s' "$seen_from" | grep -F "$name	$from	" | head -1 | cut -f3 || true)
+                if [ -n "$prior" ] && [ "$prior" != "$actual" ]; then
+                    echo "Error: $name comes from $from in more than one target, with different bytes" >&2
+                    exit 1
+                fi
+                seen_from="$seen_from$name	$from	$actual
+    "
+            fi
+            checked=$((checked + 1))
+            target_checked=$((target_checked + 1))
+        done <<< "$records"
+
+        # Belt to the assignment's brace: if jq ever exits clean while emitting
+        # a different number of records than the manifest has entries, the ones
+        # it skipped went unhashed and this run proved nothing about them.
+        if [ "$target_checked" -ne "$listed" ]; then
+            echo "Error: $target/vendor.json lists $listed files but $target_checked were checked" >&2
+            exit 1
+        fi
+
+        # The build installs exactly what the manifest lists, so a file sitting
+        # here unlisted is one somebody expected to ship and which silently
+        # will not.
+        for path in "$vendor/$target"/*; do
+            name=$(basename "$path")
+            [ "$name" = "vendor.json" ] && continue
+            if ! just _vendored-files "$target" | grep -qxF "$name"; then
+                echo "Error: $target/$name is not listed in $target/vendor.json" >&2
+                exit 1
+            fi
+        done
+    done
+
+    if [ "$checked" -eq 0 ]; then
+        echo "Error: no vendored files found under $vendor" >&2
+        exit 1
+    fi
+    echo "==> OK: $checked vendored files match their manifests"
+
+# sha256sum is GNU; macOS ships shasum instead.
+_sha256-cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        echo "shasum -a 256"
+    else
+        echo "Error: need sha256sum or shasum" >&2
+        exit 1
+    fi
 
 # Clean all build artifacts
 clean:

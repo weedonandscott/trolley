@@ -11,6 +11,17 @@ pub const GHOSTTY_CONFIG_FILENAME: &str = "ghostty.conf";
 pub const ENVIRONMENT_FILENAME: &str = "environment";
 pub const FONTS_CONFIG_FILENAME: &str = "fonts.conf";
 
+/// Microsoft's redistributable console host, built into the Windows runtime
+/// tarball and installed alongside the runtime executable. The runtime refuses
+/// to start without these — see `runtime/vendor/README.md`.
+///
+/// Deliberately a separate list from `runtime/vendor/<target>/vendor.json`,
+/// which says what a runtime built from this tree ships. This says what a
+/// runtime tarball must contain to be usable, and the CLI can be pointed at one
+/// it was not built beside.
+pub const WINDOWS_CONSOLE_HOST_FILENAMES: [&str; 3] =
+    ["conpty.dll", "OpenConsole.exe", "conpty-LICENSE.txt"];
+
 /// Bundled Windows icon filename as a `&str`; shares its source with the Zig
 /// runtime — see `trolley_config::windows_icon_filename_str`.
 pub use trolley_config::windows_icon_filename_str;
@@ -100,16 +111,22 @@ impl BundleManifest {
         } else {
             BundleVariant::Windows
         };
+        let mut resources = vec![
+            PathBuf::from(GHOSTTY_CONFIG_FILENAME),
+            PathBuf::from(ENVIRONMENT_FILENAME),
+            PathBuf::from(CONFIG_FILENAME),
+        ];
+        // NSIS installs exactly what the manifest declares, so a file that is
+        // only copied into the bundle vanishes from the installer.
+        if is_windows {
+            resources.extend(WINDOWS_CONSOLE_HOST_FILENAMES.map(PathBuf::from));
+        }
         Self {
             runtime_name,
             core_name,
             target: *target,
             variant: layout,
-            resources: vec![
-                PathBuf::from(GHOSTTY_CONFIG_FILENAME),
-                PathBuf::from(ENVIRONMENT_FILENAME),
-                PathBuf::from(CONFIG_FILENAME),
-            ],
+            resources,
         }
     }
 
@@ -568,6 +585,16 @@ fn runtime_exe_name(target: &Target) -> &'static str {
     }
 }
 
+/// Every file a resolved runtime directory has to contain. The exe alone is not
+/// proof of a finished extraction — it is the first entry in the tarball.
+fn runtime_required_files(target: &Target) -> Vec<&'static str> {
+    let mut files = vec![runtime_exe_name(target)];
+    if target.is_windows() {
+        files.extend(WINDOWS_CONSOLE_HOST_FILENAMES);
+    }
+    files
+}
+
 /// Directory where a runtime binary is cached locally.
 fn runtime_cache_dir(target: &Target) -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "trolley")
@@ -654,39 +681,70 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
     let exe_name = runtime_exe_name(target);
     let cache_path = cache_dir.join(exe_name);
 
-    if cache_path.exists() {
+    // Published by a rename, so nothing half-extracted is reachable under this
+    // name. The contents are still checked: the cache is keyed by CLI version,
+    // and what a release's tarball holds has changed within one version before.
+    if runtime_required_files(target)
+        .iter()
+        .all(|name| cache_dir.join(name).exists())
+    {
         return Ok(cache_path);
     }
+    if cache_dir.exists() {
+        std::fs::remove_dir_all(&cache_dir)
+            .with_context(|| format!("clearing an outdated runtime at {}", cache_dir.display()))?;
+    }
 
-    std::fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("creating runtime cache directory {}", cache_dir.display()))?;
+    let parent = cache_dir
+        .parent()
+        .context("runtime cache directory has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating runtime cache directory {}", parent.display()))?;
+
+    // A sibling, so the rename stays on one filesystem. A run killed mid-extract
+    // leaves this behind; it is ours to discard.
+    let staging = cache_dir.with_extension("partial");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .with_context(|| format!("clearing an unfinished download at {}", staging.display()))?;
+    }
+    std::fs::create_dir_all(&staging)
+        .with_context(|| format!("creating {}", staging.display()))?;
 
     eprintln!("Downloading trolley runtime for {target}...");
     eprintln!("  {url}");
 
-    let response = ureq::get(url.as_str())
-        .call()
-        .with_context(|| format!("downloading runtime from {url}"))?;
+    let fetched = (|| -> Result<()> {
+        let response = ureq::get(url.as_str())
+            .call()
+            .with_context(|| format!("downloading runtime from {url}"))?;
 
-    let mut archive_bytes = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .read_to_end(&mut archive_bytes)
-        .with_context(|| format!("reading runtime response from {url}"))?;
+        let mut archive_bytes = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .read_to_end(&mut archive_bytes)
+            .with_context(|| format!("reading runtime response from {url}"))?;
 
-    extract_tar_xz_flat(io::Cursor::new(archive_bytes), &cache_dir)?;
+        extract_tar_xz_flat(io::Cursor::new(archive_bytes), &staging)?;
+
+        for name in runtime_required_files(target) {
+            if !staging.join(name).exists() {
+                bail!("the runtime archive from {url} did not contain {name}");
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = fetched {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+
+    std::fs::rename(&staging, &cache_dir)
+        .with_context(|| format!("moving the runtime into {}", cache_dir.display()))?;
 
     eprintln!("Runtime installed to {}", cache_dir.display());
-
-    if cache_path.exists() {
-        Ok(cache_path)
-    } else {
-        bail!(
-            "downloaded runtime but file not found at {}",
-            cache_path.display()
-        );
-    }
+    Ok(cache_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +912,44 @@ mod tests {
             embeds: Embeds::default(),
             ghostty: BTreeMap::new(),
         }
+    }
+
+    // The bundle copy and the manifest are independent code paths; only the
+    // manifest reaches the installer.
+    #[test]
+    fn windows_manifest_declares_the_console_host() {
+        let manifest = BundleManifest::new(&test_manifest(), &Target::X86_64Windows);
+        for name in WINDOWS_CONSOLE_HOST_FILENAMES {
+            assert!(
+                manifest.resources.iter().any(|r| r == Path::new(name)),
+                "{name} missing from Windows bundle resources"
+            );
+        }
+    }
+
+    #[test]
+    fn non_windows_manifest_omits_the_console_host() {
+        let manifest = BundleManifest::new(&test_manifest(), &Target::X86_64Linux);
+        for name in WINDOWS_CONSOLE_HOST_FILENAMES {
+            assert!(
+                !manifest.resources.iter().any(|r| r == Path::new(name)),
+                "{name} should not ship on Linux"
+            );
+        }
+    }
+
+    // A cache hit is judged against this list, so a name missing from it is a
+    // half-extracted runtime the CLI accepts as complete.
+    #[test]
+    fn required_runtime_files_cover_the_console_host_on_windows() {
+        let windows = runtime_required_files(&Target::X86_64Windows);
+        assert!(windows.contains(&"trolley.exe"));
+        for name in WINDOWS_CONSOLE_HOST_FILENAMES {
+            assert!(windows.contains(&name), "{name} should gate a Windows cache hit");
+        }
+
+        let linux = runtime_required_files(&Target::X86_64Linux);
+        assert_eq!(linux, vec!["trolley"]);
     }
 
     #[test]
@@ -1222,8 +1318,8 @@ mod tests {
         let expected = "trolley runtime payload line, repeated so the xz stream has something to compress\n".repeat(64);
         assert_eq!(payload, expected);
 
-        // `nested/extra.txt` in the archive: every entry lands, flattened to
-        // its basename.
+        // `nested/extra.txt` in the archive: runtime tarballs are no longer
+        // single-file, so every entry must land, flattened to its basename.
         assert!(!dir.path().join("nested").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("extra.txt")).unwrap(),
