@@ -234,6 +234,7 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .initial_width = 0,
     .initial_height = 0,
     .resizable = -1,
+    .maximized = -1,
     .min_width = 0,
     .min_height = 0,
     .max_width = 0,
@@ -1351,7 +1352,8 @@ pub fn main() !void {
     ghostty.ghostty_surface_set_focus(surface, true);
 
     // -- Show window --
-    _ = wam.ShowWindow(hwnd, wam.SW_SHOW);
+    const show_cmd = if (g_window_config.maximized == 1) wam.SW_SHOWMAXIMIZED else wam.SW_SHOW;
+    _ = wam.ShowWindow(hwnd, show_cmd);
 
     // -- Event loop --
     var msg: wam.MSG = undefined;

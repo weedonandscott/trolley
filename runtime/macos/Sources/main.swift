@@ -9,7 +9,7 @@ var gWindow: NSWindow?
 var gSurface: ghostty_surface_t?
 var gApp: ghostty_app_t?
 var gWindowConfig = TrolleyGuiConfig(
-    initial_width: 0, initial_height: 0, resizable: -1,
+    initial_width: 0, initial_height: 0, resizable: -1, maximized: -1,
     min_width: 0, min_height: 0, max_width: 0, max_height: 0,
     win_precise_timer: 0
 )
@@ -764,6 +764,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         window.center()
+
+        // Zoom after center() so un-zoom restores the centered frame.
+        if gWindowConfig.maximized == 1 {
+            window.zoom(nil)
+        }
+
         gWindow = window
 
         // -- Create view and surface --

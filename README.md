@@ -248,8 +248,12 @@ command you give it.
 
 ### `[gui]` -- optional
 
-`initial_width`, `initial_height`, `resizable`, `min_width`, `min_height`,
-`max_width`, `max_height`.
+`initial_width`, `initial_height`, `resizable`, `maximized`, `min_width`,
+`min_height`, `max_width`, `max_height`.
+
+`maximized = true` opens the window maximized, with the initial size kept as
+the restore size; it cannot be combined with `resizable = false` or with
+`max_width`/`max_height`.
 
 ### `[fonts]` -- optional
 

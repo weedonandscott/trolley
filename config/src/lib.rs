@@ -451,6 +451,8 @@ pub struct Gui {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resizable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximized: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_height: Option<u32>,
@@ -469,6 +471,7 @@ impl Gui {
         self.initial_width.is_none()
             && self.initial_height.is_none()
             && self.resizable.is_none()
+            && self.maximized.is_none()
             && self.min_width.is_none()
             && self.min_height.is_none()
             && self.max_width.is_none()
@@ -850,6 +853,18 @@ impl Config {
             }
         }
 
+        // maximized contradicts a fixed or capped window size
+        if self.gui.maximized == Some(true) {
+            if self.gui.resizable == Some(false) {
+                errors.push("[window] maximized cannot be combined with resizable = false".into());
+            }
+            if self.gui.max_width.is_some() || self.gui.max_height.is_some() {
+                errors.push(
+                    "[window] maximized cannot be combined with max_width/max_height".into(),
+                );
+            }
+        }
+
         // initial size should be within min/max bounds
         if let Some(w) = self.gui.initial_width {
             if let Some(min) = self.gui.min_width {
@@ -1218,6 +1233,8 @@ pub struct TrolleyGuiConfig {
     pub initial_height: u32,
     /// -1 = unset, 0 = false, 1 = true.
     pub resizable: i8,
+    /// -1 = unset, 0 = false, 1 = true.
+    pub maximized: i8,
     /// Minimum width in pixels. 0 = unset.
     pub min_width: u32,
     /// Minimum height in pixels. 0 = unset.
@@ -1262,6 +1279,11 @@ pub unsafe extern "C" fn trolley_load_manifest(
         window_config.initial_width = manifest.gui.initial_width.unwrap_or(0);
         window_config.initial_height = manifest.gui.initial_height.unwrap_or(0);
         window_config.resizable = match manifest.gui.resizable {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        };
+        window_config.maximized = match manifest.gui.maximized {
             None => -1,
             Some(false) => 0,
             Some(true) => 1,
@@ -1875,6 +1897,33 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
     }
 
     #[test]
+    fn validate_window_maximized_with_resizable_false() {
+        let mut m = minimal_manifest();
+        m.gui.maximized = Some(true);
+        m.gui.resizable = Some(false);
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("maximized cannot be combined with resizable = false"));
+    }
+
+    #[test]
+    fn validate_window_maximized_with_max_size() {
+        let mut m = minimal_manifest();
+        m.gui.maximized = Some(true);
+        m.gui.max_width = Some(1024);
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("maximized cannot be combined with max_width/max_height"));
+    }
+
+    #[test]
+    fn validate_window_maximized_ok() {
+        let mut m = minimal_manifest();
+        m.gui.maximized = Some(true);
+        m.gui.initial_width = Some(800);
+        m.gui.min_width = Some(400);
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
     fn validate_window_width_below_min() {
         let mut m = minimal_manifest();
         m.gui.initial_width = Some(200);
@@ -1964,6 +2013,7 @@ args = ["--flag"]
         assert!(output.contains("initial_width = 800"));
         assert!(output.contains("initial_height = 600"));
         assert!(!output.contains("resizable")); // None fields skipped
+        assert!(!output.contains("maximized"));
     }
 
     #[test]

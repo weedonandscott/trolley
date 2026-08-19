@@ -24,6 +24,7 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .initial_width = 0,
     .initial_height = 0,
     .resizable = -1,
+    .maximized = -1,
     .min_width = 0,
     .min_height = 0,
     .max_width = 0,
@@ -735,6 +736,11 @@ pub fn main() !void {
     // Resizable hint (must be set before window creation)
     if (g_window_config.resizable == 0) {
         glfw.glfwWindowHint(glfw.GLFW_RESIZABLE, glfw.GLFW_FALSE);
+    }
+
+    // Maximized hint (must be set before window creation)
+    if (g_window_config.maximized == 1) {
+        glfw.glfwWindowHint(glfw.GLFW_MAXIMIZED, glfw.GLFW_TRUE);
     }
 
     const window = glfw.glfwCreateWindow(initial_width, initial_height, "trolley", null, null) orelse {
