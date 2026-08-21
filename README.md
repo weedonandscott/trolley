@@ -170,6 +170,26 @@ If you need full shell quoting or arguments containing spaces, you must fall
 back to `[ghostty].command` and accept shell semantics. `args` cannot be used
 together with `[ghostty].command`.
 
+`[linux]` accepts an optional `category`, which sets the `Categories=` key of
+the generated `.desktop` entry (deb, rpm, pacman) — the desktop menu section
+the app appears under. An AppImage carries the same `.desktop` internally, but
+nothing installs it, so the menu section only appears once the user integrates
+the AppImage.
+
+```toml
+[linux]
+binaries = { x86_64 = "path/to/binary" }
+category = "Utility"
+```
+
+The value is matched fuzzily against cargo-packager's `AppCategory` list
+(`Business`, `Developer Tool`, `Education`, `Entertainment`, `Finance`, `Game`
+and its sub-genres, `Graphics and Design`, `Healthcare and Fitness`,
+`Lifestyle`, `Medical`, `Music`, `News`, `Photography`, `Productivity`,
+`Reference`, `Social Networking`, `Sports`, `Travel`, `Utility`, `Video`,
+`Weather`), so `"developer-tool"` and `"Developer Tool"` both work. An
+unrecognized value is an error, with a suggestion when there is a near match.
+
 On Windows, 1ms timer resolution is enabled by default instead of the usual
 ~15.6ms. This reduces timer jitter and can improve animation smoothness, but
 might slightly increase CPU usage. Set `precise_timer = false` to opt out.

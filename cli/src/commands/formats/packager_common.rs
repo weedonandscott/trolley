@@ -1,11 +1,32 @@
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use cargo_packager::PackageFormat;
-use cargo_packager::config::{Binary, Config as PackagerConfig, Resource};
+use cargo_packager::config::{
+    AppCategory, Binary, Config as PackagerConfig, Resource,
+};
 use trolley_config::{ArtifactNaming, Config, Format};
 
 use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
+
+/// Resolve `[linux] category` against cargo-packager's fuzzy `AppCategory`
+/// matcher, which returns the closest accepted spelling as a suggestion.
+pub fn parse_linux_category(config: &Config) -> Result<Option<AppCategory>> {
+    let Some(input) = config.linux.as_ref().and_then(|l| l.category.as_deref()) else {
+        return Ok(None);
+    };
+    match AppCategory::from_str(input) {
+        Ok(category) => Ok(Some(category)),
+        Err(Some(suggestion)) => anyhow::bail!(
+            "[linux] category: unknown category \"{input}\" (did you mean \"{suggestion}\"?)"
+        ),
+        Err(None) => anyhow::bail!(
+            "[linux] category: unknown category \"{input}\" (see the accepted list in the \
+             trolley README, e.g. \"Utility\", \"Developer Tool\", \"Education\")"
+        ),
+    }
+}
 
 /// Formats handled by cargo-packager. Every variant maps 1:1 to a PackageFormat.
 pub enum PackagerFormat {
@@ -128,6 +149,9 @@ fn build_packager_config(
         let mut deb = cargo_packager::config::DebianConfig::default();
         deb.package_name = Some(config.app.slug.clone());
         packager_config.deb = Some(deb);
+        // Linux only: on macOS this field is LSApplicationCategoryType, which
+        // [linux] category has no business setting.
+        packager_config.category = parse_linux_category(config)?;
     }
 
     // Code-signing: only the matching platform's config is applied. The signing structs hold

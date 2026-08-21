@@ -553,8 +553,10 @@ pub struct Linux {
     pub binaries: BTreeMap<Arch, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Freedesktop application category (e.g. `"Utility"`, `"Developer Tool"`),
+    /// fuzzy-matched against the accepted names listed in the README.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub appimage: Option<AppImageConfig>,
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -581,13 +583,6 @@ pub struct Windows {
     pub precise_timer: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<WindowsSigning>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AppImageConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub categories: Option<String>,
 }
 
 /// macOS code-signing / notarization settings (non-secret selectors only).
@@ -737,6 +732,11 @@ impl Config {
                 }
             }
             validate_platform_args("[linux]", &linux.args, &mut errors);
+            // Only blankness here — the fuzzy name match lives in the CLI, where
+            // cargo-packager's AppCategory is available.
+            if matches!(&linux.category, Some(c) if c.trim().is_empty()) {
+                errors.push("[linux] category must not be empty".into());
+            }
         }
         if let Some(ref macos) = self.macos {
             if macos.binaries.is_empty() {
@@ -1347,7 +1347,7 @@ mod tests {
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
                 args: Vec::new(),
-                appimage: None,
+                category: None,
             }),
             macos: None,
             windows: None,
@@ -1799,7 +1799,7 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
         m.linux = Some(Linux {
             binaries: BTreeMap::new(),
             args: Vec::new(),
-            appimage: None,
+            category: None,
         });
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("[linux] binaries must not be empty"));
@@ -1811,7 +1811,7 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
         m.linux = Some(Linux {
             binaries: BTreeMap::from([(Arch::X86_64, "  ".into())]),
             args: Vec::new(),
-            appimage: None,
+            category: None,
         });
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("[linux] binary path for x86_64 must not be empty"));
@@ -2595,11 +2595,11 @@ binaries = { x86_64 = "my-app" }
     }
 
     // -----------------------------------------------------------------------
-    // AppImageConfig
+    // Linux category
     // -----------------------------------------------------------------------
 
     #[test]
-    fn appimage_config_roundtrip() {
+    fn linux_category_roundtrip() {
         let toml_str = r#"
 [app]
 identifier = "com.example.test"
@@ -2609,15 +2609,20 @@ version = "1.0.0"
 
 [linux]
 binaries = { x86_64 = "my-app" }
-
-[linux.appimage]
-categories = "Utility"
+category = "Utility"
 "#;
         let manifest: Config = toml::from_str(toml_str).unwrap();
         let linux = manifest.linux.as_ref().unwrap();
-        let appimage = linux.appimage.as_ref().unwrap();
-        assert_eq!(appimage.categories.as_deref(), Some("Utility"));
+        assert_eq!(linux.category.as_deref(), Some("Utility"));
         assert!(linux.args.is_empty());
+    }
+
+    #[test]
+    fn validate_linux_category_blank() {
+        let mut m = minimal_manifest();
+        m.linux.as_mut().unwrap().category = Some("  ".into());
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("[linux] category must not be empty"));
     }
 
     // -----------------------------------------------------------------------
