@@ -1231,10 +1231,10 @@ pub struct TrolleyGuiConfig {
     pub initial_width: u32,
     /// Initial height in pixels. 0 = unset.
     pub initial_height: u32,
-    /// -1 = unset, 0 = false, 1 = true.
-    pub resizable: i8,
-    /// -1 = unset, 0 = false, 1 = true.
-    pub maximized: i8,
+    /// 0 = false, 1 = true (default).
+    pub resizable: u8,
+    /// 0 = false (default), 1 = true.
+    pub maximized: u8,
     /// Minimum width in pixels. 0 = unset.
     pub min_width: u32,
     /// Minimum height in pixels. 0 = unset.
@@ -1278,16 +1278,8 @@ pub unsafe extern "C" fn trolley_load_manifest(
         let window_config = unsafe { &mut *window_out };
         window_config.initial_width = manifest.gui.initial_width.unwrap_or(0);
         window_config.initial_height = manifest.gui.initial_height.unwrap_or(0);
-        window_config.resizable = match manifest.gui.resizable {
-            None => -1,
-            Some(false) => 0,
-            Some(true) => 1,
-        };
-        window_config.maximized = match manifest.gui.maximized {
-            None => -1,
-            Some(false) => 0,
-            Some(true) => 1,
-        };
+        window_config.resizable = u8::from(manifest.gui.resizable.unwrap_or(true));
+        window_config.maximized = u8::from(manifest.gui.maximized.unwrap_or(false));
         window_config.min_width = manifest.gui.min_width.unwrap_or(0);
         window_config.min_height = manifest.gui.min_height.unwrap_or(0);
         window_config.max_width = manifest.gui.max_width.unwrap_or(0);
