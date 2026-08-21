@@ -818,50 +818,44 @@ impl Config {
         // Window dimension checks
         if let Some(w) = self.gui.initial_width {
             if w == 0 {
-                errors.push("[window] width must be greater than 0".into());
+                errors.push("[gui] width must be greater than 0".into());
             }
         }
         if let Some(h) = self.gui.initial_height {
             if h == 0 {
-                errors.push("[window] height must be greater than 0".into());
+                errors.push("[gui] height must be greater than 0".into());
             }
         }
         if let Some(w) = self.gui.min_width {
             if w == 0 {
-                errors.push("[window] min_width must be greater than 0".into());
+                errors.push("[gui] min_width must be greater than 0".into());
             }
         }
         if let Some(h) = self.gui.min_height {
             if h == 0 {
-                errors.push("[window] min_height must be greater than 0".into());
+                errors.push("[gui] min_height must be greater than 0".into());
             }
         }
 
         // min must not exceed max
         if let (Some(min), Some(max)) = (self.gui.min_width, self.gui.max_width) {
             if min > max {
-                errors.push(format!(
-                    "[window] min_width ({min}) must not exceed max_width ({max})"
-                ));
+                errors.push(format!("[gui] min_width ({min}) must not exceed max_width ({max})"));
             }
         }
         if let (Some(min), Some(max)) = (self.gui.min_height, self.gui.max_height) {
             if min > max {
-                errors.push(format!(
-                    "[window] min_height ({min}) must not exceed max_height ({max})"
-                ));
+                errors.push(format!("[gui] min_height ({min}) must not exceed max_height ({max})"));
             }
         }
 
         // maximized contradicts a fixed or capped window size
         if self.gui.maximized == Some(true) {
             if self.gui.resizable == Some(false) {
-                errors.push("[window] maximized cannot be combined with resizable = false".into());
+                errors.push("[gui] maximized cannot be combined with resizable = false".into());
             }
             if self.gui.max_width.is_some() || self.gui.max_height.is_some() {
-                errors.push(
-                    "[window] maximized cannot be combined with max_width/max_height".into(),
-                );
+                errors.push("[gui] maximized cannot be combined with max_width/max_height".into());
             }
         }
 
@@ -870,15 +864,13 @@ impl Config {
             if let Some(min) = self.gui.min_width {
                 if w < min {
                     errors.push(format!(
-                        "[window] width ({w}) must not be less than min_width ({min})"
+                        "[gui] width ({w}) must not be less than min_width ({min})"
                     ));
                 }
             }
             if let Some(max) = self.gui.max_width {
                 if w > max {
-                    errors.push(format!(
-                        "[window] width ({w}) must not exceed max_width ({max})"
-                    ));
+                    errors.push(format!("[gui] width ({w}) must not exceed max_width ({max})"));
                 }
             }
         }
@@ -886,15 +878,13 @@ impl Config {
             if let Some(min) = self.gui.min_height {
                 if h < min {
                     errors.push(format!(
-                        "[window] height ({h}) must not be less than min_height ({min})"
+                        "[gui] height ({h}) must not be less than min_height ({min})"
                     ));
                 }
             }
             if let Some(max) = self.gui.max_height {
                 if h > max {
-                    errors.push(format!(
-                        "[window] height ({h}) must not exceed max_height ({max})"
-                    ));
+                    errors.push(format!("[gui] height ({h}) must not exceed max_height ({max})"));
                 }
             }
         }
@@ -1948,7 +1938,7 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
         assert!(!output.contains("windows"));
         assert!(!output.contains("[embeds]"));
         assert!(!output.contains("[ghostty]"));
-        assert!(!output.contains("[window]"));
+        assert!(!output.contains("[gui]"));
     }
 
     #[test]
