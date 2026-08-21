@@ -61,6 +61,9 @@ fn main() -> Result<()> {
             skip_failed_formats,
         } => {
             let ctx = commands::common::ProjectContext::load(config, output)?;
+            for warning in ctx.config.file_association_warnings() {
+                eprintln!("warning: {warning}");
+            }
             let target = target.unwrap_or_else(Target::host);
             let tui_binary =
                 commands::common::resolve_tui_binary(&ctx.project_dir, &ctx.config, &target)?;

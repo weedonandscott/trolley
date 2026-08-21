@@ -33,6 +33,27 @@ pub fn run(path: Option<String>) -> Result<()> {
         .unwrap_or("my-app")
         .to_string();
 
+    let final_content = render(&dir_name)?;
+
+    std::fs::write(&manifest_path, &final_content)
+        .with_context(|| format!("writing {}", manifest_path.display()))?;
+
+    println!("Created {}", common::CONFIG_FILENAME);
+    println!();
+    println!("Next steps:");
+    println!(
+        "  1. Update app.identifier and app.display_name in {}",
+        common::CONFIG_FILENAME
+    );
+    println!("  2. Set the binary paths in {}", common::CONFIG_FILENAME);
+    println!("  3. Build your TUI binary");
+    println!("  4. Run `trolley run` to test");
+
+    Ok(())
+}
+
+/// The manifest text `init` writes for a project named `dir_name`.
+fn render(dir_name: &str) -> Result<String> {
     let binary_placeholder = format!("path/to/{dir_name}");
     let all_arches = BTreeMap::from([
         (Arch::X86_64, binary_placeholder.clone()),
@@ -43,24 +64,27 @@ pub fn run(path: Option<String>) -> Result<()> {
         binaries: all_arches.clone(),
         args: Vec::new(),
         category: None,
+        file_associations: Vec::new(),
     });
     let macos = Some(Macos {
         binaries: all_arches.clone(),
         args: Vec::new(),
         signing: None,
+        file_associations: Vec::new(),
     });
     let windows = Some(Windows {
         binaries: all_arches,
         args: Vec::new(),
         precise_timer: None,
         signing: None,
+        file_associations: Vec::new(),
     });
 
     let manifest = Config {
         app: App {
             identifier: format!("com.example.{dir_name}"),
-            display_name: dir_name.clone(),
-            slug: dir_name,
+            display_name: dir_name.to_string(),
+            slug: dir_name.to_string(),
             version: "0.1.0".into(),
             icons: vec![],
         },
@@ -74,20 +98,45 @@ pub fn run(path: Option<String>) -> Result<()> {
         ghostty: BTreeMap::new(),
     };
 
-    let content = toml::to_string_pretty(&manifest).context("serializing manifest")?;
+    let mut content = toml::to_string_pretty(&manifest).context("serializing manifest")?;
 
-    // The serializer emits only [linux.binaries], so add the [linux] header.
-    let linux_block = "\n\
-        [linux]\n\
-        # Desktop menu section. See the README.\n\
-        # category = \"Utility\"\n";
-    let content = match content.find("\n[linux.binaries]") {
-        Some(index) => {
-            let (head, tail) = content.split_at(index);
-            format!("{head}{linux_block}{tail}")
+    // The serializer emits only [<platform>.binaries], so each platform header
+    // is added by hand, with its commented-out examples. Hand-written: serializing
+    // would expand the inline tables into [[...]].
+    let platform_blocks = [
+        (
+            "linux",
+            "\n\
+            [linux]\n\
+            # Desktop menu section. See the README.\n\
+            # category = \"Utility\"\n\
+            # File types this app opens. See the README.\n\
+            # file_associations = [\n\
+            #   { extensions = [\"md\"], mime_type = \"text/markdown\" },\n\
+            # ]\n",
+        ),
+        (
+            "macos",
+            "\n\
+            [macos]\n\
+            # file_associations = [\n\
+            #   { extensions = [\"md\"], role = \"editor\" },\n\
+            # ]\n",
+        ),
+        (
+            "windows",
+            "\n\
+            [windows]\n\
+            # file_associations = [\n\
+            #   { extensions = [\"md\"], description = \"Markdown document\" },\n\
+            # ]\n",
+        ),
+    ];
+    for (platform, block) in platform_blocks {
+        if let Some(index) = content.find(&format!("\n[{platform}.binaries]")) {
+            content.insert_str(index, block);
         }
-        None => content,
-    };
+    }
 
     // Generate commented-out [fonts] example.
     // We write this manually rather than serializing a Fonts struct because
@@ -120,21 +169,80 @@ pub fn run(path: Option<String>) -> Result<()> {
         # shaders = [\"shaders/crt.glsl\"]\n\
         # data = [\"assets\", \"config/defaults.json\"]\n";
 
-    let final_content = format!("{content}{fonts_block}{env_block}{embeds_block}");
+    Ok(format!("{content}{fonts_block}{env_block}{embeds_block}"))
+}
 
-    std::fs::write(&manifest_path, &final_content)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trolley_config::{FileAssociationRole, FontFamily};
 
-    println!("Created {}", common::CONFIG_FILENAME);
-    println!();
-    println!("Next steps:");
-    println!(
-        "  1. Update app.identifier and app.display_name in {}",
-        common::CONFIG_FILENAME
-    );
-    println!("  2. Set the binary paths in {}", common::CONFIG_FILENAME);
-    println!("  3. Build your TUI binary");
-    println!("  4. Run `trolley run` to test");
+    /// Uncomments the example lines: TOML after `# ` (a header, a bracket or
+    /// indented continuation, or `key = `). Prose comments stay commented.
+    fn uncomment_examples(text: &str) -> String {
+        let is_example = |rest: &str| {
+            rest.starts_with(['[', ']', ' '])
+                || rest.split_once(" = ").is_some_and(|(key, _)| {
+                    !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                })
+        };
+        text.lines()
+            .map(|line| match line.strip_prefix("# ") {
+                Some(rest) if is_example(rest) => rest,
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
-    Ok(())
+    // The scaffold with every commented-out example switched on parses as a
+    // Config, passes validate() and the linux category name-match, and carries
+    // each example's values.
+    #[test]
+    fn scaffold_examples_are_valid() {
+        let text = uncomment_examples(&render("my-app").unwrap());
+        let config: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        config.validate().unwrap();
+        super::super::formats::packager_common::parse_linux_category(&config).unwrap();
+
+        let [linux] = config.linux_file_associations() else {
+            panic!("expected one [linux] file association:\n{text}");
+        };
+        assert_eq!(linux.extensions, ["md"]);
+        assert_eq!(linux.mime_type, "text/markdown");
+        let [macos] = config.macos_file_associations() else {
+            panic!("expected one [macos] file association:\n{text}");
+        };
+        assert_eq!(macos.extensions, ["md"]);
+        assert_eq!(macos.role, FileAssociationRole::Editor);
+        let [windows] = config.windows_file_associations() else {
+            panic!("expected one [windows] file association:\n{text}");
+        };
+        assert_eq!(windows.extensions, ["md"]);
+        assert_eq!(windows.description, "Markdown document");
+        // The examples agree across platforms, so they print no warnings.
+        assert_eq!(config.file_association_warnings(), Vec::<String>::new());
+
+        assert_eq!(config.linux.unwrap().category.as_deref(), Some("Utility"));
+
+        assert!(matches!(
+            config.fonts.families.as_slice(),
+            [FontFamily::NerdFont(n), FontFamily::Path(p)]
+                if n == "Inconsolata" && p == "fonts/MyCustomFont-Regular.ttf"
+        ));
+
+        assert_eq!(config.environment.env_file.as_deref(), Some(".env"));
+        assert_eq!(
+            config
+                .environment
+                .variables
+                .get("MY_VAR")
+                .map(String::as_str),
+            Some("value")
+        );
+
+        assert_eq!(config.embeds.theme.as_deref(), Some("themes/dracula"));
+        assert_eq!(config.embeds.shaders, ["shaders/crt.glsl"]);
+        assert_eq!(config.embeds.data, ["assets", "config/defaults.json"]);
+    }
 }

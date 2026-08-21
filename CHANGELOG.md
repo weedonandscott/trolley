@@ -10,11 +10,12 @@
 
 ### CLI
 
-- [linux] **BREAKING:** `[linux.appimage] categories` is replaced by `[linux]
-        category`. The old key was parsed but never forwarded to any packager,
-        so it never had an effect; the new one sets `Categories=` in the
-        generated `.desktop` entry. A manifest still using the old location now
-        fails to parse
+- [all] New `file_associations` in `[linux]`, `[macos]` and `[windows]`:
+        double-clicking a declared file type opens the app, which receives
+        the file paths in `TROLLEY_OPEN_PATHS`
+- [linux] **BREAKING:** `[linux.appimage] categories` is now `[linux]
+        category`. The old key never had any effect
+- [linux] RPM packages now ship a `.desktop` entry, like deb and pacman
 
 ## 0.11.0
 

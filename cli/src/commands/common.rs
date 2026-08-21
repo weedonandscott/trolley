@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use trolley_config::{Config, ENVIRONMENT_DEFAULTS, FontFamily, Target};
+use trolley_config::{Config, ENVIRONMENT_DEFAULTS, FontFamily, Target, open_paths_var_str};
 
 pub const VERSION: &str = env!("TROLLEY_VERSION");
 
@@ -762,7 +762,25 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
 /// 2. env_file contents (parsed by dotenvy)
 /// 3. Inline `[environment] variables` from manifest
 pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u8>> {
+    let (buf, warnings) = assemble_environment_with_warnings(project_dir, config)?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(buf)
+}
+
+fn assemble_environment_with_warnings(
+    project_dir: &Path,
+    config: &Config,
+) -> Result<(Vec<u8>, Vec<String>)> {
     let mut vars: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut warnings = Vec::new();
+    let open_paths_var = open_paths_var_str();
+    let open_paths_warning = |source: &str| {
+        format!(
+            "{source} sets {open_paths_var}, which trolley sets itself to the files the app was opened with; remove it"
+        )
+    };
 
     // 1. Defaults
     for (key, value) in ENVIRONMENT_DEFAULTS {
@@ -777,6 +795,9 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
         {
             let (key, value) =
                 item.with_context(|| format!("parsing env_file {}", env_path.display()))?;
+            if key == open_paths_var {
+                warnings.push(open_paths_warning(&format!("env_file {env_file}")));
+            }
             vars.insert(key, value);
         }
     }
@@ -792,6 +813,9 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
             .join("\n");
         for item in dotenvy::from_read_iter(inline.as_bytes()) {
             let (key, value) = item.context("parsing [environment] variables")?;
+            if key == open_paths_var {
+                warnings.push(open_paths_warning("[environment] variables"));
+            }
             vars.insert(key, value);
         }
     }
@@ -800,7 +824,7 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
     for (key, value) in &vars {
         write!(buf, "{key}={value}\n")?;
     }
-    Ok(buf)
+    Ok((buf, warnings))
 }
 
 // ---------------------------------------------------------------------------
@@ -907,6 +931,7 @@ mod tests {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
                 args: Vec::new(),
                 category: None,
+                file_associations: Vec::new(),
             }),
             macos: None,
             windows: None,
@@ -1033,6 +1058,38 @@ mod tests {
         manifest.environment.env_file = Some("nonexistent.env".into());
         let result = assemble_environment(dir.path(), &manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn environment_warns_when_open_paths_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "TROLLEY_OPEN_PATHS=/a\n").unwrap();
+        let mut manifest = test_manifest();
+        manifest.environment.env_file = Some(".env".into());
+        manifest
+            .environment
+            .variables
+            .insert("TROLLEY_OPEN_PATHS".into(), "/b".into());
+        let (_, warnings) = assemble_environment_with_warnings(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            warnings,
+            vec![
+                "env_file .env sets TROLLEY_OPEN_PATHS, which trolley sets itself to the files the app was opened with; remove it",
+                "[environment] variables sets TROLLEY_OPEN_PATHS, which trolley sets itself to the files the app was opened with; remove it",
+            ]
+        );
+    }
+
+    #[test]
+    fn environment_without_open_paths_has_no_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = test_manifest();
+        manifest
+            .environment
+            .variables
+            .insert("FOO".into(), "bar".into());
+        let (_, warnings) = assemble_environment_with_warnings(dir.path(), &manifest).unwrap();
+        assert!(warnings.is_empty());
     }
 
     #[test]

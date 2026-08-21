@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const trolley = @cImport(@cInclude("trolley.h"));
 
 /// Get the directory containing the current executable.
 /// Caller must free the returned slice.
@@ -33,6 +34,46 @@ pub fn chdirToExeDir() void {
     dir.setAsCwd() catch {};
 }
 
+/// Absolutize launch arguments against the current working directory and join
+/// them with newlines, for TROLLEY_OPEN_PATHS. Lexical only — no existence
+/// check, no symlink canonicalization. Must run before chdirToExeDir.
+/// Returns null when there is nothing to open or when collection fails; every
+/// failure prints to stderr. The caller passes an arena that lives as long as
+/// the process; nothing is freed.
+pub fn collectOpenPaths(arena: std.mem.Allocator, args: []const []const u8) ?[:0]const u8 {
+    if (args.len == 0) return null;
+
+    const cwd = std.process.getCwdAlloc(arena) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths, getcwd failed: {s}\n", .{@errorName(err)});
+        return null;
+    };
+
+    const absolute = arena.alloc([]const u8, args.len) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths: {s}\n", .{@errorName(err)});
+        return null;
+    };
+
+    var resolved: usize = 0;
+    for (args) |arg| {
+        // An empty argument resolves to the CWD, which is a directory, not a
+        // file the user asked to open.
+        if (arg.len == 0) continue;
+        // Drop just this path rather than the whole set: the other arguments
+        // are still openable.
+        absolute[resolved] = std.fs.path.resolve(arena, &.{ cwd, arg }) catch |err| {
+            std.debug.print("trolley: skipping open path \"{s}\": {s}\n", .{ arg, @errorName(err) });
+            continue;
+        };
+        resolved += 1;
+    }
+    if (resolved == 0) return null;
+
+    return std.mem.joinZ(arena, "\n", absolute[0..resolved]) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths: {s}\n", .{@errorName(err)});
+        return null;
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
@@ -48,6 +89,48 @@ pub fn setenvZ(name: [*:0]const u8, value: [*:0]const u8) bool {
     }
 }
 extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
+
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) c_int;
+
+/// Remove a variable from the environment ghostty copies into the TUI: the
+/// libc environ on POSIX, the process environment block on Windows.
+pub fn unsetenvZ(name: [:0]const u8) bool {
+    if (comptime builtin.os.tag == .windows) {
+        const wide = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, name) catch return false;
+        defer std.heap.page_allocator.free(wide);
+        return SetEnvironmentVariableW(wide, null) != 0;
+    } else {
+        return unsetenv(name) == 0;
+    }
+}
+
+/// Set by the runtime to the files the app was opened with; the name comes from
+/// the config crate, shared with the packager and the macOS runtime.
+pub fn openPathsVar() [:0]const u8 {
+    return std.mem.span(trolley.trolley_open_paths_var());
+}
+
+/// The TUI inherits the runtime's environment, so a value inherited from a
+/// parent launch would otherwise reach it as if this launch had been given paths.
+pub fn clearInheritedOpenPaths() void {
+    _ = unsetenvZ(openPathsVar());
+}
+
+test "clearInheritedOpenPaths hides the variable from getEnvMap" {
+    try std.testing.expect(setenvZ(openPathsVar().ptr, "/inherited/path"));
+    {
+        var env = try std.process.getEnvMap(std.testing.allocator);
+        defer env.deinit();
+        try std.testing.expectEqualStrings("/inherited/path", env.get(openPathsVar()).?);
+    }
+
+    clearInheritedOpenPaths();
+
+    var env = try std.process.getEnvMap(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expect(env.get(openPathsVar()) == null);
+}
 
 /// Read the bundled `environment` file and call setenv for each KEY=VALUE line.
 /// Skips blank lines and lines starting with `#`.

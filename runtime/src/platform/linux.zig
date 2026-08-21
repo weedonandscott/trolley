@@ -32,6 +32,10 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .win_precise_timer = 0,
 };
 
+// Paths this launch was asked to open (TROLLEY_OPEN_PATHS); null on a plain
+// launch. Captured before the chdir, since they may be CWD-relative.
+var g_open_paths: ?[:0]const u8 = null;
+
 // ---------------------------------------------------------------------------
 // GLFW ↔ ghostty OpenGL context bridge
 // ---------------------------------------------------------------------------
@@ -700,7 +704,30 @@ fn glfwErrorCallback(err: c_int, description: [*c]const u8) callconv(.c) void {
     std.debug.print("GLFW error {d}: {s}\n", .{ err, description });
 }
 
+/// Read the file paths passed on the command line. Must run before the chdir,
+/// and before ghostty_init, which replaces std.os.argv with its own argument
+/// slice. Moving the call after either one breaks this silently.
+fn captureOpenPaths() void {
+    const argv = std.os.argv;
+    if (argv.len <= 1) return;
+
+    // Startup data that lives as long as the process; never freed.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const alloc = arena.allocator();
+
+    const args = alloc.alloc([]const u8, argv.len - 1) catch return;
+    for (argv[1..], 0..) |arg, i| args[i] = std.mem.span(arg);
+
+    g_open_paths = common.collectOpenPaths(alloc, args);
+}
+
 pub fn main() !void {
+    // -- Drop open paths inherited from a parent launch (must precede ghostty_init) --
+    common.clearInheritedOpenPaths();
+
+    // -- Capture open-with paths (must precede the chdir and ghostty_init) --
+    captureOpenPaths();
+
     // -- Change CWD to the exe's directory --
     common.chdirToExeDir();
 
@@ -822,6 +849,16 @@ pub fn main() !void {
             .gl_userdata = @ptrCast(window),
         },
     };
+
+    // Hand the opened paths to the TUI process. Per-surface env vars are
+    // layered over the inherited environment, which main() cleared of this
+    // variable, so a plain launch sees nothing.
+    var open_paths_env: [1]ghostty.ghostty_env_var_s = undefined;
+    if (g_open_paths) |paths| {
+        open_paths_env[0] = .{ .key = common.openPathsVar().ptr, .value = paths.ptr };
+        surface_config.env_vars = &open_paths_env;
+        surface_config.env_var_count = 1;
+    }
 
     // Content scale
     var xscale: f32 = 1.0;
