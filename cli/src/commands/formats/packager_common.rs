@@ -4,9 +4,9 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use cargo_packager::PackageFormat;
 use cargo_packager::config::{
-    AppCategory, Binary, Config as PackagerConfig, Resource,
+    AppCategory, Binary, BundleTypeRole, Config as PackagerConfig, FileAssociation, Resource,
 };
-use trolley_config::{ArtifactNaming, Config, Format};
+use trolley_config::{ArtifactNaming, Config, FileAssociationRole, Format};
 
 use super::super::common::{BundleManifest, BundleVariant, anchored_glob_pattern};
 
@@ -25,6 +25,46 @@ pub fn parse_linux_category(config: &Config) -> Result<Option<AppCategory>> {
             "[linux] category: unknown category \"{input}\" (see the accepted list in the \
              trolley README, e.g. \"Utility\", \"Developer Tool\", \"Education\")"
         ),
+    }
+}
+
+/// Map trolley's file associations onto cargo-packager's.
+///
+/// The handler name is always `<slug>.<first extension>`: NSIS derives the
+/// ProgID from it, and a bare extension would be a globally shared registry
+/// class. The same string is macOS's `CFBundleTypeName`, where it is harmless.
+pub fn packager_file_associations(config: &Config) -> Option<Vec<FileAssociation>> {
+    if config.app.file_associations.is_empty() {
+        return None;
+    }
+    Some(
+        config
+            .app
+            .file_associations
+            .iter()
+            .map(|a| {
+                let mut mapped = FileAssociation::new(a.extensions.iter().cloned());
+                mapped = mapped.mime_type(a.mime_type.clone());
+                if let Some(description) = &a.description {
+                    mapped = mapped.description(description.clone());
+                }
+                mapped = mapped.role(bundle_type_role(a.role));
+                if let Some(first) = a.extensions.first() {
+                    mapped = mapped.name(format!("{}.{first}", config.app.slug));
+                }
+                mapped
+            })
+            .collect(),
+    )
+}
+
+fn bundle_type_role(role: FileAssociationRole) -> BundleTypeRole {
+    match role {
+        FileAssociationRole::Editor => BundleTypeRole::Editor,
+        FileAssociationRole::Viewer => BundleTypeRole::Viewer,
+        FileAssociationRole::Shell => BundleTypeRole::Shell,
+        FileAssociationRole::QlGenerator => BundleTypeRole::QLGenerator,
+        FileAssociationRole::None => BundleTypeRole::None,
     }
 }
 
@@ -144,6 +184,9 @@ fn build_packager_config(
                 .collect(),
         )
     };
+
+    // Every backend ignores the fields that do not apply to it.
+    packager_config.file_associations = packager_file_associations(config);
 
     if let BundleVariant::Linux { .. } = manifest.variant {
         let mut deb = cargo_packager::config::DebianConfig::default();
@@ -299,4 +342,168 @@ pub fn run_packager(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use trolley_config::{
+        App, Arch, Embeds, Environment, FileAssociation, Fonts, Gui, Linux, Target, Windows,
+    };
+
+    fn test_config(associations: Vec<FileAssociation>, category: Option<&str>) -> Config {
+        Config {
+            app: App {
+                identifier: "com.example.myapp".into(),
+                display_name: "MyApp".into(),
+                slug: "myapp".into(),
+                version: "1.0.0".into(),
+                icons: vec![],
+                file_associations: associations,
+            },
+            linux: Some(Linux {
+                binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
+                args: Vec::new(),
+                category: category.map(Into::into),
+            }),
+            macos: None,
+            windows: None,
+            fonts: Fonts::default(),
+            gui: Gui::default(),
+            environment: Environment::default(),
+            embeds: Embeds::default(),
+            ghostty: BTreeMap::new(),
+        }
+    }
+
+    fn association(extensions: &[&str], role: FileAssociationRole) -> FileAssociation {
+        FileAssociation {
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            mime_type: "text/markdown".into(),
+            description: Some("Markdown document".into()),
+            role,
+        }
+    }
+
+    // A bare `md` ProgID is a globally shared registry class, so the name must
+    // always be slug-namespaced even though trolley has no `name` field.
+    #[test]
+    fn association_name_defaults_to_slug_dot_first_extension() {
+        let config = test_config(
+            vec![association(&["md", "markdown"], FileAssociationRole::Editor)],
+            None,
+        );
+        let mapped = packager_file_associations(&config).unwrap();
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].name.as_deref(), Some("myapp.md"));
+        assert_eq!(mapped[0].extensions, vec!["md", "markdown"]);
+        assert_eq!(mapped[0].mime_type.as_deref(), Some("text/markdown"));
+        assert_eq!(mapped[0].description.as_deref(), Some("Markdown document"));
+    }
+
+    #[test]
+    fn no_associations_maps_to_none() {
+        assert!(packager_file_associations(&test_config(vec![], None)).is_none());
+    }
+
+    #[test]
+    fn association_roles_map_onto_bundle_type_roles() {
+        let config = test_config(
+            vec![
+                association(&["a"], FileAssociationRole::Editor),
+                association(&["b"], FileAssociationRole::Viewer),
+                association(&["c"], FileAssociationRole::Shell),
+                association(&["d"], FileAssociationRole::QlGenerator),
+                association(&["e"], FileAssociationRole::None),
+            ],
+            None,
+        );
+        let roles: Vec<BundleTypeRole> = packager_file_associations(&config)
+            .unwrap()
+            .iter()
+            .map(|a| a.role.clone())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                BundleTypeRole::Editor,
+                BundleTypeRole::Viewer,
+                BundleTypeRole::Shell,
+                BundleTypeRole::QLGenerator,
+                BundleTypeRole::None,
+            ]
+        );
+    }
+
+    #[test]
+    fn category_is_fuzzy_matched() {
+        let config = test_config(vec![], Some("developer-tool"));
+        assert_eq!(
+            parse_linux_category(&config).unwrap(),
+            Some(AppCategory::DeveloperTool)
+        );
+        assert_eq!(
+            parse_linux_category(&test_config(vec![], None)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn category_error_carries_the_suggestion() {
+        let err = parse_linux_category(&test_config(vec![], Some("gaming")))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "[linux] category: unknown category \"gaming\" (did you mean \"Game\"?)"
+        );
+    }
+
+    #[test]
+    fn category_error_without_suggestion_points_at_the_list() {
+        let err = parse_linux_category(&test_config(vec![], Some("fhqwhgads")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown category \"fhqwhgads\""));
+        assert!(err.contains("accepted list"));
+    }
+
+    // The same packager field is LSApplicationCategoryType on macOS, so it must
+    // never leave the Linux branch.
+    #[test]
+    fn category_reaches_the_packager_config_for_linux_only() {
+        let config = test_config(vec![], Some("Utility"));
+        let built = |target| {
+            let manifest = BundleManifest::new(&config, &target);
+            build_packager_config(
+                &config,
+                Path::new("/project"),
+                Path::new("/project/bundle"),
+                Path::new("/project/out"),
+                &manifest,
+                &[],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            built(Target::X86_64Linux).category,
+            Some(AppCategory::Utility)
+        );
+        assert_eq!(built(Target::X86_64Macos).category, None);
+        assert_eq!(built(Target::X86_64Windows).category, None);
+    }
+
+    #[test]
+    fn category_is_ignored_without_a_linux_section() {
+        let mut config = test_config(vec![], Some("gaming"));
+        config.linux = None;
+        config.windows = Some(Windows {
+            binaries: BTreeMap::from([(Arch::X86_64, "my-app.exe".into())]),
+            args: Vec::new(),
+            precise_timer: None,
+            signing: None,
+        });
+        assert_eq!(parse_linux_category(&config).unwrap(), None);
+    }
 }

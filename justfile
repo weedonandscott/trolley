@@ -487,6 +487,11 @@ sanity-test *flags:
         # AppImage requires a square icon; give the init project one.
         cp "{{ justfile_directory() }}/tests/sanity/icon.png" "$test_dir/project/icon.png"
         sed -i '/^\[app\]$/a icons = ["icon.png"]' "$test_dir/project/trolley.toml"
+        # A file association and a category, so the .desktop assertions below
+        # have something to find. The scaffold emits a [linux] header with
+        # category commented out; a real one goes right after the header.
+        sed -i '/^\[app\]$/a file_associations = [{ extensions = ["snty"], mime_type = "text/x-sanity", role = "editor" }]' "$test_dir/project/trolley.toml"
+        sed -i '/^\[linux\]$/a category = "Utility"' "$test_dir/project/trolley.toml"
         # CI runners have no FUSE; tell linuxdeploy to self-extract instead
         export APPIMAGE_EXTRACT_AND_RUN=1
     elif [[ "$target" == *-windows ]]; then
@@ -494,6 +499,10 @@ sanity-test *flags:
         # assertions below need an image Windows can actually draw.
         cp "{{ justfile_directory() }}/tests/sanity/icon.ico" "$test_dir/project/icon.ico"
         sed -i '/^\[app\]$/a icons = ["icon.ico"]' "$test_dir/project/trolley.toml"
+        # The same association the Linux branch injects, so makensis actually
+        # compiles the file-association block and the .nsi assertion below has
+        # something to find.
+        sed -i '/^\[app\]$/a file_associations = [{ extensions = ["snty"], mime_type = "text/x-sanity", role = "editor" }]' "$test_dir/project/trolley.toml"
     fi
     TROLLEY_RUNTIME_SOURCE="$runtime" \
         "$cli" package --config "$test_dir/project/trolley.toml" | tee "$test_dir/package.log"
@@ -540,6 +549,27 @@ sanity-test *flags:
             echo "Error: AppImage is missing $icon_path" >&2
             exit 1
         fi
+
+        # The .desktop entry carries the file association and the category.
+        # Only the deb's contents are read: rpm's entry is pinned byte-for-byte
+        # by the desktop_entry unit tests, and extracting from an rpm would need
+        # tools the CI runners do not have.
+        desktop_path="usr/share/applications/project.desktop"
+        # Leading * in the pattern so it matches whether or not the member is
+        # stored with a ./ prefix. `-f -` because tar's default archive is a
+        # compiled-in device that $TAPE overrides. `|| true` so a missing member
+        # reports the message below instead of tar's.
+        deb_desktop=$(dpkg-deb --fsys-tarfile "$dist/project_0.1.0_${deb_arch}.deb" | tar -xO -f - --wildcards "*$desktop_path" || true)
+        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$desktop_path" >/dev/null; then
+            echo "Error: rpm is missing /$desktop_path" >&2
+            exit 1
+        fi
+        for line in "Exec=project %F" "MimeType=text/x-sanity" "Categories=Utility;"; do
+            if ! printf '%s\n' "$deb_desktop" | grep -F "$line" >/dev/null; then
+                echo "Error: deb $desktop_path is missing '$line'" >&2
+                exit 1
+            fi
+        done
     fi
     if [[ "$target" == *-windows ]]; then
         bundle="$test_dir/project/trolley/build/com.example.project/$target/bundle"
@@ -614,6 +644,16 @@ sanity-test *flags:
                 exit 1
             fi
         done <<< "$vendored_files"
+
+        # The registry writes live in a handlebars-rendered NSIS script and the
+        # installer is opaque, so assert on the script makensis was handed. It
+        # is UTF-16LE, hence the NUL strip. Not grep -q: see the note above.
+        nsis_arch="x64"; if [ "$arch" = "aarch64" ]; then nsis_arch="arm64"; fi
+        nsi="$test_dir/project/trolley/build/com.example.project/$target/packager/.cargo-packager/nsis/$nsis_arch/installer.nsi"
+        if ! tr -d '\000' < "$nsi" | grep -aF 'APP_ASSOCIATE "snty" "project.snty"' >/dev/null; then
+            echo "Error: $nsi does not associate .snty with the project.snty ProgID" >&2
+            exit 1
+        fi
     fi
 
     echo "==> Sanity test passed"

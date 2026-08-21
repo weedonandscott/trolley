@@ -443,6 +443,126 @@ pub struct App {
     pub version: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub icons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_associations: Vec<FileAssociation>,
+}
+
+/// A file type the packaged app registers itself as a handler for.
+///
+/// Mirrors cargo-packager's shape without depending on it (this crate is also a
+/// staticlib linked into the runtime).
+/// `Deserialize` is hand-written below; unknown keys are rejected there.
+#[derive(Debug, Serialize)]
+pub struct FileAssociation {
+    pub extensions: Vec<String>,
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub role: FileAssociationRole,
+}
+
+/// Serde's bare "missing field `mime_type`" leaves a Windows- or macOS-only
+/// developer guessing why a mime type is being asked of them at all, so the
+/// explanation below replaces it. Raised from inside the field loop, while the
+/// deserializer still points at the offending table: a `try_from` shadow struct
+/// reports the error only after the table is consumed, which collapses the span
+/// onto the whole `file_associations` array.
+impl<'de> Deserialize<'de> for FileAssociation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &["extensions", "mime_type", "description", "role"];
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Extensions,
+            MimeType,
+            Description,
+            Role,
+        }
+
+        struct AssociationVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AssociationVisitor {
+            type Value = FileAssociation;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a file association table")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> std::result::Result<FileAssociation, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error;
+                let mut extensions: Option<Vec<String>> = None;
+                let mut mime_type: Option<String> = None;
+                let mut description: Option<String> = None;
+                let mut role: Option<FileAssociationRole> = None;
+                while let Some(key) = map.next_key::<Field>()? {
+                    match key {
+                        Field::Extensions => {
+                            if extensions.is_some() {
+                                return Err(Error::duplicate_field("extensions"));
+                            }
+                            extensions = Some(map.next_value()?);
+                        }
+                        Field::MimeType => {
+                            if mime_type.is_some() {
+                                return Err(Error::duplicate_field("mime_type"));
+                            }
+                            mime_type = Some(map.next_value()?);
+                        }
+                        Field::Description => {
+                            if description.is_some() {
+                                return Err(Error::duplicate_field("description"));
+                            }
+                            description = Some(map.next_value()?);
+                        }
+                        Field::Role => {
+                            if role.is_some() {
+                                return Err(Error::duplicate_field("role"));
+                            }
+                            role = Some(map.next_value()?);
+                        }
+                    }
+                }
+                Ok(FileAssociation {
+                    extensions: extensions.ok_or_else(|| Error::missing_field("extensions"))?,
+                    mime_type: mime_type.ok_or_else(|| Error::custom(MIME_TYPE_REQUIRED))?,
+                    description,
+                    role: role.ok_or_else(|| Error::custom(ROLE_REQUIRED))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct("FileAssociation", FIELDS, AssociationVisitor)
+    }
+}
+
+const MIME_TYPE_REQUIRED: &str = "mime_type is required, e.g. \"text/markdown\", or \
+     \"application/x-myapp\" for a type of your own. It is required on every platform, not \
+     only with [linux]: Linux matches files by mime type rather than by extension, so a Linux \
+     package without one registers nothing, and adding [linux] later must not invalidate a \
+     manifest that already worked";
+
+const ROLE_REQUIRED: &str = "role is required: \"editor\" for an app that opens and changes \
+     the file, otherwise \"viewer\", \"shell\" or \"ql_generator\". \"none\" is not a way to \
+     leave it unspecified — it declares the app is not a handler for the type at all, which \
+     stops the association from registering";
+
+/// The app's role with respect to an associated file type. `None` declares the
+/// app is not a handler for the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAssociationRole {
+    Editor,
+    Viewer,
+    Shell,
+    QlGenerator,
+    None,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -711,6 +831,83 @@ impl Config {
         // app.version must be non-empty
         if self.app.version.trim().is_empty() {
             errors.push("[app] version must not be empty".into());
+        }
+
+        // [app] file_associations
+        {
+            let mut claimed: BTreeMap<&str, usize> = BTreeMap::new();
+            for (i, association) in self.app.file_associations.iter().enumerate() {
+                let label = format!("[app] file_associations[{i}]");
+                if association.extensions.is_empty() {
+                    errors.push(format!("{label}: extensions must not be empty"));
+                }
+                for ext in &association.extensions {
+                    if let Err(e) = validate_file_extension(ext) {
+                        errors.push(format!("{label}: {e}"));
+                        continue;
+                    }
+                    // Keep the first claimant: overwriting would make a third
+                    // collision blame the second association instead of the first.
+                    if let Some(&first) = claimed.get(ext.as_str()) {
+                        if first == i {
+                            errors.push(format!(
+                                "{label}: extension \"{ext}\" is listed more than once in \
+                                 the same association"
+                            ));
+                        } else {
+                            errors.push(format!(
+                                "{label}: extension \"{ext}\" is already claimed by \
+                                 file_associations[{first}]"
+                            ));
+                        }
+                    } else {
+                        claimed.insert(ext.as_str(), i);
+                    }
+                }
+                let mime = &association.mime_type;
+                // Blank would otherwise reach the shape check and be reported
+                // as malformed, which reads as a typo rather than an omission.
+                if mime.trim().is_empty() {
+                    errors.push(format!("{label}: mime_type must not be empty"));
+                } else {
+                    let well_formed = mime
+                        .split_once('/')
+                        .is_some_and(|(t, s)| !t.is_empty() && !s.is_empty() && !s.contains('/'));
+                    if !well_formed {
+                        errors.push(format!(
+                            "{label}: mime_type \"{mime}\" must be of the form \"type/subtype\""
+                        ));
+                    }
+                    // The .desktop `MimeType=` key is line-oriented and ';'-separated
+                    // and no backend escapes it, so either character forges entries.
+                    if mime
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace() || c == ';')
+                    {
+                        errors.push(format!(
+                            "{label}: mime_type \"{mime}\" must not contain whitespace, \
+                             control characters or ';'"
+                        ));
+                    }
+                }
+                if let Some(description) = &association.description {
+                    if description.trim().is_empty() {
+                        errors.push(format!("{label}: description must not be empty"));
+                    }
+                    // Windows-only, and the NSIS backend writes it into a quoted
+                    // macro argument without escaping: '"' ends the argument and
+                    // aborts the build, '$' expands as an NSIS variable.
+                    if description
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '"' | '$' | '`'))
+                    {
+                        errors.push(format!(
+                            "{label}: description must not contain control characters, \
+                             '\"', '$' or '`'"
+                        ));
+                    }
+                }
+            }
         }
 
         // At least one platform section must be present
@@ -1140,6 +1337,35 @@ fn validate_display_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Validate a file-association extension.
+///
+/// Every backend writes the extension verbatim into a registry class, a glob,
+/// or a plist, so the accepted set is the intersection: bare (no leading dot),
+/// lowercase ASCII alphanumerics plus `.+-_`.
+fn validate_file_extension(ext: &str) -> std::result::Result<(), String> {
+    if ext.is_empty() {
+        return Err("extensions must not contain an empty string".into());
+    }
+    if ext.starts_with('.') {
+        return Err(format!(
+            "extension \"{ext}\" must not start with '.' (use \"md\", not \".md\")"
+        ));
+    }
+    if ext.chars().any(char::is_whitespace) {
+        return Err(format!("extension \"{ext}\" must not contain whitespace"));
+    }
+    if !ext
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '_'))
+    {
+        return Err(format!(
+            "extension \"{ext}\" must contain only lowercase ASCII alphanumeric characters \
+             and '.', '+', '-', '_'"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_platform_args(section: &str, args: &[String], errors: &mut Vec<String>) {
     for (index, arg) in args.iter().enumerate() {
         if arg.is_empty() {
@@ -1343,6 +1569,7 @@ mod tests {
                 slug: "test".into(),
                 version: "1.0.0".into(),
                 icons: vec![],
+                file_associations: Vec::new(),
             },
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
@@ -2626,6 +2853,364 @@ category = "Utility"
     }
 
     // -----------------------------------------------------------------------
+    // File associations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_associations_roundtrip() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [
+  { extensions = ["md", "markdown"], mime_type = "text/markdown", description = "Markdown document", role = "editor" },
+  { extensions = ["ql"], mime_type = "text/x-ql", role = "ql_generator" },
+]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#;
+        let manifest: Config = toml::from_str(toml_str).unwrap();
+        let associations = &manifest.app.file_associations;
+        assert_eq!(associations.len(), 2);
+        assert_eq!(associations[0].extensions, vec!["md", "markdown"]);
+        assert_eq!(associations[0].mime_type, "text/markdown");
+        assert_eq!(
+            associations[0].description.as_deref(),
+            Some("Markdown document")
+        );
+        assert_eq!(associations[0].role, FileAssociationRole::Editor);
+        assert_eq!(associations[1].role, FileAssociationRole::QlGenerator);
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn file_associations_and_category_skip_when_default() {
+        let manifest = minimal_manifest();
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(!serialized.contains("file_associations"));
+        assert!(!serialized.contains("category"));
+    }
+
+    #[test]
+    fn file_association_unknown_key_rejected() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [{ extensions = ["md"], name = "Markdown" }]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("name"), "unexpected error: {err}");
+    }
+
+    fn manifest_with_associations(associations: Vec<FileAssociation>) -> Config {
+        let mut m = minimal_manifest();
+        m.app.file_associations = associations;
+        m
+    }
+
+    fn association(extensions: &[&str]) -> FileAssociation {
+        FileAssociation {
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            mime_type: "text/plain".into(),
+            description: None,
+            role: FileAssociationRole::Editor,
+        }
+    }
+
+    #[test]
+    fn validate_file_association_empty_extensions() {
+        let err = manifest_with_associations(vec![association(&[])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[app] file_associations[0]: extensions must not be empty"));
+    }
+
+    #[test]
+    fn validate_file_association_leading_dot() {
+        let err = manifest_with_associations(vec![association(&[".md"])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("use \"md\", not \".md\""));
+    }
+
+    #[test]
+    fn validate_file_association_empty_extension_string() {
+        let err = manifest_with_associations(vec![association(&[""])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extensions must not contain an empty string"));
+    }
+
+    #[test]
+    fn validate_file_association_extension_with_whitespace() {
+        let err = manifest_with_associations(vec![association(&["my ext"])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extension \"my ext\" must not contain whitespace"));
+    }
+
+    #[test]
+    fn validate_file_association_uppercase_extension() {
+        let err = manifest_with_associations(vec![association(&["MD"])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must contain only lowercase ASCII alphanumeric characters"));
+    }
+
+    #[test]
+    fn validate_file_association_duplicate_extension() {
+        let mut second = association(&["md"]);
+        second.mime_type = "text/markdown".into();
+        let err = manifest_with_associations(vec![association(&["md"]), second])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extension \"md\" is already claimed by file_associations[0]"));
+    }
+
+    #[test]
+    fn validate_file_association_third_duplicate_names_the_first_claimant() {
+        let mut second = association(&["md"]);
+        second.mime_type = "text/markdown".into();
+        let mut third = association(&["md"]);
+        third.mime_type = "text/x-markdown".into();
+        let err = manifest_with_associations(vec![association(&["md"]), second, third])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(
+            "[app] file_associations[2]: extension \"md\" is already claimed by \
+             file_associations[0]"
+        ));
+        assert!(!err.contains(
+            "[app] file_associations[2]: extension \"md\" is already claimed by \
+             file_associations[1]"
+        ));
+    }
+
+    #[test]
+    fn validate_file_association_shared_mime_type_is_allowed() {
+        // Two associations may share a mime type, e.g. to give each
+        // extension its own role or description.
+        manifest_with_associations(vec![association(&["md"]), association(&["csv"])])
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_file_association_extension_duplicated_within_one_association() {
+        let err = manifest_with_associations(vec![association(&["md", "md"])])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(
+            "[app] file_associations[0]: extension \"md\" is listed more than once in the \
+             same association"
+        ));
+    }
+
+    #[test]
+    fn file_association_mime_type_required() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [{ extensions = ["md"] }]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("mime_type is required"), "{err}");
+        assert!(err.contains("not only with [linux]"), "{err}");
+    }
+
+    // Omitting `role` used to mean editor while `none` means the app is not a
+    // handler at all. Requiring it keeps those two from being confused.
+    #[test]
+    fn file_association_role_required() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [{ extensions = ["md"], mime_type = "text/markdown" }]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("role is required"), "{err}");
+        assert!(err.contains("not a way to leave it unspecified"), "{err}");
+    }
+
+    #[test]
+    fn file_association_mime_type_required_without_linux() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [{ extensions = ["md"] }]
+
+[windows]
+binaries = { x86_64 = "my-app.exe" }
+"#;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("mime_type is required"), "{err}");
+        assert!(err.contains("not only with [linux]"), "{err}");
+    }
+
+    /// The parse error must name the association that is missing the field, not
+    /// just the document, or a manifest with several is a guessing game.
+    #[test]
+    fn file_association_mime_type_required_error_points_at_the_offender() {
+        let toml_str = r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [
+  { extensions = ["md"], mime_type = "text/markdown", role = "editor" },
+  { extensions = ["csv"], role = "editor" },
+  { extensions = ["ql"], mime_type = "text/x-ql", role = "editor" },
+]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        // Line 9 is the `csv` association.
+        assert!(err.contains("line 9"), "{err}");
+    }
+
+    #[test]
+    fn validate_file_association_blank_mime_type() {
+        for blank in ["", "   "] {
+            let mut a = association(&["md"]);
+            a.mime_type = blank.into();
+            let err = manifest_with_associations(vec![a])
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("[app] file_associations[0]: mime_type must not be empty"),
+                "{err}"
+            );
+            // The blank case must not also be reported as malformed.
+            assert!(!err.contains("type/subtype"), "{err}");
+        }
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_needs_slash() {
+        for bad in ["markdown", "/", "text/", "/markdown", "a/b/c"] {
+            let mut a = association(&["md"]);
+            a.mime_type = bad.into();
+            let err = manifest_with_associations(vec![a])
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("must be of the form \"type/subtype\""),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_rejects_control_characters() {
+        let mut a = association(&["md"]);
+        a.mime_type = "text/markdown\nExec=/bin/sh".into();
+        let err = manifest_with_associations(vec![a])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not contain whitespace, control characters or ';'"));
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_rejects_semicolons() {
+        let mut a = association(&["md"]);
+        a.mime_type = "text/a;text/b".into();
+        let err = manifest_with_associations(vec![a])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not contain whitespace, control characters or ';'"));
+    }
+
+    #[test]
+    fn validate_file_association_blank_description() {
+        let mut a = association(&["md"]);
+        a.description = Some("   ".into());
+        let err = manifest_with_associations(vec![a])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[app] file_associations[0]: description must not be empty"));
+    }
+
+    #[test]
+    fn validate_file_association_description_rejects_control_characters() {
+        let mut a = association(&["md"]);
+        a.description = Some("Markdown\ndocument".into());
+        let err = manifest_with_associations(vec![a])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(
+            "[app] file_associations[0]: description must not contain control characters, \
+             '\"', '$' or '`'"
+        ));
+    }
+
+    #[test]
+    fn validate_file_association_description_rejects_nsis_metacharacters() {
+        for bad in ["The \"best\" document", "Costs $5", "A `quoted` document"] {
+            let mut a = association(&["md"]);
+            a.description = Some(bad.into());
+            let err = manifest_with_associations(vec![a])
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(
+                    "[app] file_associations[0]: description must not contain control \
+                     characters, '\"', '$' or '`'"
+                ),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_association_plain_description_is_accepted() {
+        let mut a = association(&["md"]);
+        a.description = Some("Markdown document".into());
+        manifest_with_associations(vec![a]).validate().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
     // Slug validation
     // -----------------------------------------------------------------------
 
@@ -2689,6 +3274,7 @@ category = "Utility"
                 slug: "trolley".into(),
                 version: "1.2.3".into(),
                 icons: vec![],
+                file_associations: Vec::new(),
             }
         }
 

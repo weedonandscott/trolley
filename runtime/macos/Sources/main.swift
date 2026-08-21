@@ -15,6 +15,12 @@ var gWindowConfig = TrolleyGuiConfig(
     win_precise_timer: 0
 )
 
+// Paths this launch was asked to open (TROLLEY_OPEN_PATHS); nil on a plain
+// launch. The surface's command is frozen at creation, so opens that arrive
+// after it exists cannot be delivered.
+var gOpenPaths: String?
+var gSurfaceCreated = false
+
 // ---------------------------------------------------------------------------
 // Modifier translation
 // ---------------------------------------------------------------------------
@@ -676,6 +682,29 @@ func buildMainMenu() -> NSMenu {
 // AppDelegate
 // ---------------------------------------------------------------------------
 class AppDelegate: NSObject, NSApplicationDelegate {
+    // Launch Services delivers opens as Apple events, never as argv. At launch
+    // this fires before applicationDidFinishLaunching, so the paths are ready
+    // in time for the surface. Afterwards there is nowhere to put them.
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        guard !gSurfaceCreated else {
+            sender.reply(toOpenOrPrint: .failure)
+            return
+        }
+        guard !filenames.isEmpty else {
+            sender.reply(toOpenOrPrint: .success)
+            return
+        }
+        // Several batches can arrive before launch completes; append so an
+        // earlier one is not dropped after being acknowledged.
+        // .standardized collapses ".." lexically, matching what the Linux and
+        // Windows runtimes get from std.fs.path.resolve.
+        let paths = filenames
+            .map { URL(fileURLWithPath: $0).standardized.path }
+            .joined(separator: "\n")
+        gOpenPaths = gOpenPaths.map { "\($0)\n\(paths)" } ?? paths
+        sender.reply(toOpenOrPrint: .success)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // -- Set CWD to exe dir so relative paths (e.g. command = direct:./<slug>_core) resolve --
         FileManager.default.changeCurrentDirectoryPath(getExeDir())
@@ -787,11 +816,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         surfaceConfig.platform.macos.nsview = Unmanaged.passUnretained(view).toOpaque()
         surfaceConfig.scale_factor = window.backingScaleFactor
 
+        // Hand the opened paths to the TUI process. Per-surface env vars are
+        // layered over the inherited environment, so a plain launch sees
+        // nothing. Never freed: the launcher creates exactly one surface.
+        if let paths = gOpenPaths {
+            let envVars = UnsafeMutablePointer<ghostty_env_var_s>.allocate(capacity: 1)
+            envVars.initialize(to: ghostty_env_var_s(
+                key: UnsafePointer(strdup("TROLLEY_OPEN_PATHS")!),
+                value: UnsafePointer(strdup(paths)!)
+            ))
+            surfaceConfig.env_vars = envVars
+            surfaceConfig.env_var_count = 1
+        }
+
         guard let surface = ghostty_surface_new(app, &surfaceConfig) else {
             fputs("trolley: ghostty_surface_new failed\n", stderr)
             exit(1)
         }
         gSurface = surface
+        gSurfaceCreated = true
 
         // Set initial size
         let backed = view.convertToBacking(view.bounds.size)

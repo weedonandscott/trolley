@@ -902,6 +902,7 @@ mod tests {
                 slug: "test".into(),
                 version: "1.0.0".into(),
                 icons: vec![],
+                file_associations: Vec::new(),
             },
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),

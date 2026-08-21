@@ -33,6 +33,52 @@ pub fn chdirToExeDir() void {
     dir.setAsCwd() catch {};
 }
 
+/// Absolutize launch arguments against the current working directory and join
+/// them with newlines, for TROLLEY_OPEN_PATHS. Lexical only — no existence
+/// check, no symlink canonicalization. Must run before chdirToExeDir.
+/// Returns null when there is nothing to open or when collection fails; every
+/// failure prints to stderr. The result is leaked because it lives as long as
+/// the launcher does.
+pub fn collectOpenPaths(alloc: std.mem.Allocator, args: []const []const u8) ?[:0]const u8 {
+    if (args.len == 0) return null;
+
+    const cwd = std.process.getCwdAlloc(alloc) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths, getcwd failed: {s}\n", .{@errorName(err)});
+        return null;
+    };
+    defer alloc.free(cwd);
+
+    const absolute = alloc.alloc([]const u8, args.len) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths: {s}\n", .{@errorName(err)});
+        return null;
+    };
+    defer alloc.free(absolute);
+
+    var resolved: usize = 0;
+    defer {
+        for (absolute[0..resolved]) |path| alloc.free(path);
+    }
+
+    for (args) |arg| {
+        // An empty argument resolves to the CWD, which is a directory, not a
+        // file the user asked to open.
+        if (arg.len == 0) continue;
+        // Drop just this path rather than the whole set: the other arguments
+        // are still openable.
+        absolute[resolved] = std.fs.path.resolve(alloc, &.{ cwd, arg }) catch |err| {
+            std.debug.print("trolley: skipping open path \"{s}\": {s}\n", .{ arg, @errorName(err) });
+            continue;
+        };
+        resolved += 1;
+    }
+    if (resolved == 0) return null;
+
+    return std.mem.joinZ(alloc, "\n", absolute[0..resolved]) catch |err| {
+        std.debug.print("trolley: cannot resolve open paths: {s}\n", .{@errorName(err)});
+        return null;
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------

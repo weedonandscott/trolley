@@ -242,6 +242,10 @@ var g_window_config: trolley.TrolleyGuiConfig = .{
     .win_precise_timer = 1,
 };
 
+// Paths this launch was asked to open (TROLLEY_OPEN_PATHS); null on a plain
+// launch. Captured before the chdir, since they may be CWD-relative.
+var g_open_paths: ?[:0]const u8 = null;
+
 fn loadBundledWindowIcon(width: i32, height: i32) ?wam.HICON {
     const icon_filename = std.mem.span(trolley.trolley_windows_icon_filename());
     const path = common.getBundledPath(icon_filename) orelse return null;
@@ -1171,6 +1175,47 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+/// Index of the first real argument. The registry open command leaves the exe
+/// path unquoted, so spaces in it make the parser split the path across several
+/// argv entries; skip however many of them spell out our own executable path.
+fn firstRealArg(alloc: std.mem.Allocator, argv: []const [:0]u8) usize {
+    if (argv.len == 0) return 0;
+    const exe = std.fs.selfExePathAlloc(alloc) catch return 1;
+    defer alloc.free(exe);
+
+    var len: usize = 0;
+    for (argv, 0..) |arg, i| {
+        if (i > 0) {
+            // The space the parser consumed when it split the path here.
+            if (len >= exe.len or exe[len] != ' ') break;
+            len += 1;
+        }
+        if (len + arg.len > exe.len) break;
+        if (!std.ascii.eqlIgnoreCase(arg, exe[len .. len + arg.len])) break;
+        len += arg.len;
+        if (len == exe.len) return i + 1;
+    }
+    return 1;
+}
+
+/// Read the file paths passed on the command line. Must run before the chdir.
+/// Uses the process API rather than std.os.argv, which is empty on Windows;
+/// this decodes the UTF-16 command line.
+fn captureOpenPaths() void {
+    const alloc = std.heap.page_allocator;
+    const argv = std.process.argsAlloc(alloc) catch return;
+    defer std.process.argsFree(alloc, argv);
+
+    const first = firstRealArg(alloc, argv);
+    if (argv.len <= first) return;
+
+    const args = alloc.alloc([]const u8, argv.len - first) catch return;
+    defer alloc.free(args);
+    for (argv[first..], 0..) |arg, i| args[i] = arg;
+
+    g_open_paths = common.collectOpenPaths(alloc, args);
+}
+
 pub fn main() !void {
     // When launched from a terminal (e.g. `just run`), re-attach to the
     // parent console so stdout/stderr remain visible for debugging.
@@ -1182,6 +1227,9 @@ pub fn main() !void {
 
     // Load opengl32.dll for GL 1.1 function fallback in getProcAddress
     g_opengl32 = LoadLibraryA("opengl32.dll");
+
+    // -- Capture open-with paths (must precede the chdir below) --
+    captureOpenPaths();
 
     // -- Change CWD to the exe's directory --
     common.chdirToExeDir();
@@ -1326,6 +1374,15 @@ pub fn main() !void {
             .gl_userdata = @ptrCast(g_hglrc),
         },
     };
+
+    // Hand the opened paths to the TUI process. Per-surface env vars are
+    // layered over the inherited environment, so a plain launch sees nothing.
+    var open_paths_env: [1]ghostty.ghostty_env_var_s = undefined;
+    if (g_open_paths) |paths| {
+        open_paths_env[0] = .{ .key = "TROLLEY_OPEN_PATHS", .value = paths.ptr };
+        surface_config.env_vars = &open_paths_env;
+        surface_config.env_var_count = 1;
+    }
 
     // DPI scale
     const dpi = GetDpiForWindow(hwnd);

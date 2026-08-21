@@ -63,6 +63,7 @@ pub fn run(path: Option<String>) -> Result<()> {
             slug: dir_name,
             version: "0.1.0".into(),
             icons: vec![],
+            file_associations: Vec::new(),
         },
         linux,
         macos,
@@ -75,6 +76,30 @@ pub fn run(path: Option<String>) -> Result<()> {
     };
 
     let content = toml::to_string_pretty(&manifest).context("serializing manifest")?;
+
+    // File types the app registers as a handler for. Inline `{}` notation for
+    // the same reason as fonts: serializing would expand it to [[...]] tables.
+    let associations_block = "\n\
+        # File types this app opens. Paths land in the TUI process as\n\
+        # TROLLEY_OPEN_PATHS (newline-separated absolute paths; unset on a\n\
+        # normal launch). `mime_type` is required on every association; on Linux\n\
+        # only a type the system already defines will match files (see README).\n\
+        # `role` is macOS-only but required: editor, viewer, shell, ql_generator,\n\
+        # none — and none means the app is not a handler, not \"unspecified\".\n\
+        # See also `category` under [linux] below.\n\
+        # file_associations = [\n\
+        #   { extensions = [\"ext\"], mime_type = \"application/x-myapp\", description = \"MyApp document\", role = \"editor\" },\n\
+        # ]\n";
+
+    // The block belongs to [app], so it goes before the next section header
+    // (which is [linux.binaries], not [linux] — `binaries` is the only field).
+    let content = match content[1..].find("\n[").map(|i| i + 1) {
+        Some(index) => {
+            let (head, tail) = content.split_at(index);
+            format!("{head}{associations_block}{tail}")
+        }
+        None => format!("{content}{associations_block}"),
+    };
 
     // The serializer emits only [linux.binaries] (`binaries` is the only set
     // field), leaving no valid spot to uncomment a [linux]-level key — so
