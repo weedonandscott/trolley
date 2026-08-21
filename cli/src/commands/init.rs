@@ -42,7 +42,7 @@ pub fn run(path: Option<String>) -> Result<()> {
     let linux = Some(Linux {
         binaries: all_arches.clone(),
         args: Vec::new(),
-        appimage: None,
+        category: None,
     });
     let macos = Some(Macos {
         binaries: all_arches.clone(),
@@ -75,6 +75,19 @@ pub fn run(path: Option<String>) -> Result<()> {
     };
 
     let content = toml::to_string_pretty(&manifest).context("serializing manifest")?;
+
+    // The serializer emits only [linux.binaries], so add the [linux] header.
+    let linux_block = "\n\
+        [linux]\n\
+        # Desktop menu section. See the README.\n\
+        # category = \"Utility\"\n";
+    let content = match content.find("\n[linux.binaries]") {
+        Some(index) => {
+            let (head, tail) = content.split_at(index);
+            format!("{head}{linux_block}{tail}")
+        }
+        None => content,
+    };
 
     // Generate commented-out [fonts] example.
     // We write this manually rather than serializing a Fonts struct because

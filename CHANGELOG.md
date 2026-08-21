@@ -8,6 +8,14 @@
         maximized on all three platforms; the manifest is rejected if it is
         combined with `resizable = false` or with `max_width`/`max_height`
 
+### CLI
+
+- [linux] **BREAKING:** `[linux.appimage] categories` is replaced by `[linux]
+        category`. The old key was parsed but never forwarded to any packager,
+        so it never had an effect; the new one sets `Categories=` in the
+        generated `.desktop` entry. A manifest still using the old location now
+        fails to parse
+
 ## 0.11.0
 
 ### Runtime
