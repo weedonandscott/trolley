@@ -7,6 +7,23 @@
 - [all] New `[gui]` option `maximized = true`, which starts the window
         maximized on all three platforms; the manifest is rejected if it is
         combined with `resizable = false` or with `max_width`/`max_height`
+- [all] Pass the files an app was opened with through to the TUI process in
+        `TROLLEY_OPEN_PATHS`; previously opening a file launched the app without
+        telling it which file, on every platform
+
+### CLI
+
+- [all] New `[app] file_associations` registers the packaged app as a handler
+        for the file types it declares, so double-clicking one opens the app
+        instead of doing nothing
+- [linux] **BREAKING:** `[linux.appimage] categories` is replaced by `[linux]
+        category`, which sets `Categories=` in the generated `.desktop` entry; a
+        manifest still using the old key now fails to parse. Nothing is lost in
+        the move — the old key was parsed and then never forwarded to any
+        packager
+- [linux] RPM packages now ship a `.desktop` entry at
+        `/usr/share/applications/<slug>.desktop`, matching what cargo-packager
+        already emitted for deb and pacman
 
 ## 0.11.0
 

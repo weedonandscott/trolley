@@ -143,11 +143,105 @@ The manifest file `trolley.toml` has the following sections:
 | `slug`         | Filesystem-safe name (lowercase, hyphens)  |
 | `version`      | Version string                             |
 | `icons`        | List of icon paths/globs ([see Icons](#icons)) |
+| `file_associations` | File types the app registers as a handler for ([see below](#file-associations)) |
 
 `display_name` flows is used for packages filenames, so it must be safe:
 non-empty, no leading/trailing whitespace, no path separators (`/`, `\`),
 no control characters, and no characters invalid in Windows filenames
 (`:`, `*`, `?`, `"`, `<`, `>`, `|`).
+
+#### File associations
+
+```toml
+[app]
+file_associations = [
+  { extensions = ["md", "markdown"], mime_type = "text/markdown", description = "Markdown document", role = "editor" },
+  { extensions = ["csv"], mime_type = "text/csv", role = "viewer" },
+]
+```
+
+Both mime types above are standard ones the system already defines, which is
+what makes the example work on Linux — read the Linux note below before
+inventing a type of your own.
+
+| Field         | Required | Description |
+|---------------|----------|-------------|
+| `extensions`  | yes      | Bare extensions, no leading `.`; lowercase ASCII alphanumerics plus `.`, `+`, `-`, `_`. Windows and macOS match files on these; Linux never sees them (see below) |
+| `mime_type`   | yes      | The file's type, e.g. `text/markdown`. On Linux it must be one the system already defines (see below). No whitespace, control characters or `;` |
+| `description` | no       | Windows only — the text shown in Explorer's `Type` column. No control characters, `"`, `$` or `` ` `` |
+| `role`        | yes      | macOS only — what the app does with the type: `editor`, `viewer`, `shell`, `ql_generator` or `none` |
+
+**On Linux, only a mime type the system already defines will ever match your
+files.** Trolley does not emit a `shared-mime-info` XML, so `extensions` never 
+reaches Linux at all: the `.desktop` entry only *references* `mime_type`, and
+the desktop environment decides on its own what type a file is.
+
+- A **standard** type (`text/markdown`, `text/csv`, `application/json`, …)
+  works out of the box: `shared-mime-info` already maps the extension to it, so
+  the app appears as a handler and double-clicking opens it.
+- A **custom** type (`application/x-myapp`) makes the app a handler for a type
+  no file is ever detected as. Double-clicking `notes.myapp` does nothing: the
+  file resolves to `text/plain`, which the app never claimed. Windows and macOS
+  are unaffected — they match on `extensions`.
+
+There is no workaround: trolley cannot install a `shared-mime-info` XML, and
+offers no hook for you to install one. On Linux, use a standard type.
+
+`role` has no default and must be stated on every association. Use `editor`
+unless you have a reason not to. **`none` is not a way to leave it
+unspecified** — it declares the app is *not* a handler for the type, which
+stops the association registering on macOS.
+
+An extension containing a dot (`tar.gz`) is accepted, but Windows only ever
+matches the final component of a filename, so the generated
+`Software\Classes\.tar.gz` key is never consulted. Such an extension works on
+Linux (which associates by mime type) and on macOS, not on Windows.
+
+Per platform:
+
+| Platform | Where it lands |
+|----------|----------------|
+| Linux (deb, rpm, pacman) | `MimeType=` in the `.desktop` entry, plus `Exec=<slug> %F` — matches files only for mime types the system already defines (see above) |
+| Linux (AppImage) | The same `.desktop` is inside the AppDir, but nothing installs it into `~/.local/share/applications`. An AppImage-only ship registers no association at all unless the user integrates it (AppImageLauncher or similar) |
+| Windows (NSIS) | `Software\Classes` registry entries mapping every extension of an association to its `<slug>.<first extension>` ProgID |
+| macOS (app, dmg) | `CFBundleDocumentTypes` in `Info.plist` |
+
+##### `TROLLEY_OPEN_PATHS`
+
+Trolley runtimes forward launched file paths into the TUI process's environment:
+
+- `TROLLEY_OPEN_PATHS` is set in the TUI core's environment whenever the
+  runtime receives path arguments — in practice, an open from a file manager or
+  the Finder. A normal launch passes none, so the variable is unset.
+- The value is absolute paths, newline-joined, order preserved.
+- Paths are absolutized **lexically** against the pre-`chdir` working directory:
+  no existence check, no symlink canonicalization. Paths containing a newline
+  are not supported.
+- Multi-file: Linux (`%F`) and macOS (`openFiles`) may deliver several at once.
+  Windows invokes `<slug>_runtime.exe "%1"` once per file, so each open is a
+  separate instance carrying a single path.
+- Second open while the app is running: Windows and Linux launch a new
+  instance. On macOS the surface's command is frozen when the surface is
+  created, so the delegate replies `.failure` and the event is dropped.
+  Launch Services turns that reply into a "document could not be opened"
+  alert, so the user sees an error rather than a silent no-op. Opening into a
+  running instance is not supported.
+
+##### Known limitations
+
+- On Linux a custom mime type is referenced but never defined, so it matches no
+  file. Use a standard type.
+- macOS gets no document-type icons and no UTI declarations.
+
+##### Windows caveats
+
+- Uninstalling leaves the associations behind: the extension mapping and the
+  ProgID key survive, pointing at a deleted executable.
+- The executable path in the registry's open command is unquoted, which is a
+  path-interception hazard. Opening files works regardless.
+- A new association may go unnoticed by Explorer until the next login.
+
+These are cargo-packager bugs, reported upstream rather than worked around.
 
 ### `[linux]`, `[macos]`, `[windows]` -- at least one required
 
@@ -169,6 +263,26 @@ represented safely through Trolley's default command path today.
 If you need full shell quoting or arguments containing spaces, you must fall
 back to `[ghostty].command` and accept shell semantics. `args` cannot be used
 together with `[ghostty].command`.
+
+`[linux]` accepts an optional `category`, which sets the `Categories=` key of
+the generated `.desktop` entry (deb, rpm, pacman) — the desktop menu section
+the app appears under. An AppImage carries the same `.desktop` internally, but
+nothing installs it, so the menu section only appears once the user integrates
+the AppImage.
+
+```toml
+[linux]
+binaries = { x86_64 = "path/to/binary" }
+category = "Utility"
+```
+
+The value is matched fuzzily against cargo-packager's `AppCategory` list
+(`Business`, `Developer Tool`, `Education`, `Entertainment`, `Finance`, `Game`
+and its sub-genres, `Graphics and Design`, `Healthcare and Fitness`,
+`Lifestyle`, `Medical`, `Music`, `News`, `Photography`, `Productivity`,
+`Reference`, `Social Networking`, `Sports`, `Travel`, `Utility`, `Video`,
+`Weather`), so `"developer-tool"` and `"Developer Tool"` both work. An
+unrecognized value is an error, with a suggestion when there is a near match.
 
 On Windows, 1ms timer resolution is enabled by default instead of the usual
 ~15.6ms. This reduces timer jitter and can improve animation smoothness, but

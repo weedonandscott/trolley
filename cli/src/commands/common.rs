@@ -53,6 +53,10 @@ impl ProjectContext {
             .context("config file has no parent directory")?
             .to_path_buf();
         let config = Config::load(&config_path)?;
+        // Name-matched against cargo-packager's category list, which the config
+        // crate cannot see; fail here so every command rejects a bad value.
+        super::formats::packager_common::parse_linux_category(&config)
+            .with_context(|| format!("validating {}", config_path.display()))?;
         let output_dir = match output {
             Some(p) => PathBuf::from(p),
             None => project_dir.join("trolley"),
@@ -898,11 +902,12 @@ mod tests {
                 slug: "test".into(),
                 version: "1.0.0".into(),
                 icons: vec![],
+                file_associations: Vec::new(),
             },
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
                 args: Vec::new(),
-                appimage: None,
+                category: None,
             }),
             macos: None,
             windows: None,
