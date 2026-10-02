@@ -7,6 +7,12 @@
 - [all] New `[gui]` option `maximized = true`, which starts the window
         maximized on all three platforms; the manifest is rejected if it is
         combined with `resizable = false` or with `max_width`/`max_height`
+- [linux] Fix an intermittent crash on quit (a glibc heap-corruption abort or
+        a segfault in the Mesa driver): the runtime now exits without running
+        library teardown, which tore down EGL while the renderer was still
+        drawing
+- [windows] Quit without destroying the window first and without DLL
+        teardown, for the same race between shutdown and the renderer thread
 
 ### CLI
 
