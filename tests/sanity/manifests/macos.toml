@@ -1,0 +1,48 @@
+# Packaged by `just sanity-test --target <arch>-macos`.
+#
+# Not a scaffold and not derived from one: this file is the complete statement
+# of what that test packages. Read it against tests/sanity/listings/*-macos.list,
+# which is the output it must produce.
+#
+# `identifier` and `slug` fix the dist path the recipe globs
+# (trolley/build/com.example.project/<target>/dist) and every artifact name in
+# the listing snapshot, so neither can change without the snapshot changing.
+#
+# No `icons` and no [linux] category: this target packages without either on
+# purpose, which is what proves the icon handling is not load-bearing for a
+# plain build.
+
+[app]
+identifier = "com.example.project"
+# Two words on purpose, so the artifact-rename layer is observable:
+# cargo-packager's default dmg name differs from the composed Project_Sanity_*
+# name, so a broken rename fails the dist listing diff. It is also the name of
+# the .app bundle in the listing snapshot.
+display_name = "Project Sanity"
+slug = "project"
+version = "0.1.0"
+
+[linux.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[macos]
+# Becomes CFBundleDocumentTypes in the .app's Info.plist, which the recipe
+# reads back: one entry matched by extension alone, for a type macOS already
+# knows, and one for a type `exported_type` exports as a UTI
+# (UTExportedTypeDeclarations), with `conforms_to` so every key the declaration
+# can carry is present. `unique`: this fixture tests macOS only, so the other
+# platforms leave the types out.
+file_associations = [
+    { extensions = ["md", "markdown"], role = "viewer", unique = true },
+    { extensions = ["snty"], role = "editor", unique = true, exported_type = { identifier = "com.example.project.snty", description = "Sanity document", conforms_to = ["public.plain-text"] } },
+]
+
+# The recipe copies the trolley CLI here to stand in for a TUI binary.
+[macos.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[windows.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"

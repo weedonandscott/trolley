@@ -1,0 +1,45 @@
+# Packaged by `just sanity-test --target <arch>-windows`.
+#
+# Not a scaffold and not derived from one: this file is the complete statement
+# of what that test packages. Read it against
+# tests/sanity/listings/*-windows.list, which is the output it must produce.
+#
+# `identifier` and `slug` fix the dist path the recipe globs
+# (trolley/build/com.example.project/<target>/dist) and every artifact name in
+# the listing snapshot, so neither can change without the snapshot changing.
+
+[app]
+identifier = "com.example.project"
+# Two words on purpose, so the artifact-rename layer is observable:
+# cargo-packager's default NSIS name differs from the composed
+# Project_Sanity_* name, so a broken rename fails the dist listing diff.
+display_name = "Project Sanity"
+slug = "project"
+version = "0.1.0"
+# Must be a real .ico: parse_ico validates the header, and the recipe's icon
+# assertions need an image Windows can actually draw. The recipe copies
+# tests/sanity/icon.ico next to this file before packaging.
+icons = ["icon.ico"]
+
+# No [linux] category: this target never renders a .desktop entry.
+
+[linux.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[macos.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[windows]
+# Makes makensis compile the file-association block, which the recipe reads
+# back out of the generated installer.nsi. `unique`: this fixture tests
+# Windows only, so the other platforms leave the type out.
+file_associations = [
+    { extensions = ["snty"], description = "Sanity document", unique = true },
+]
+
+# The recipe copies the trolley CLI here to stand in for a TUI binary.
+[windows.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"

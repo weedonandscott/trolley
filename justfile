@@ -416,8 +416,10 @@ check-linkage *flags:
             ""
     fi
 
-# Sanity-test the release artifacts: init a project, package all default
-# formats, diff dist/ against its committed listing snapshot
+# Sanity-test the release artifacts. Two independent checks: `trolley init`
+# scaffolds a project and its manifest is asserted on where it lies, then a
+# committed fixture from tests/sanity/manifests/ is packaged in every default
+# format and dist/ is diffed against its committed listing snapshot.
 # Requires: --target <triple>; --bless rewrites the dist listing snapshot
 sanity-test *flags:
     #!/usr/bin/env bash
@@ -445,6 +447,7 @@ sanity-test *flags:
     exe="trolley"; if [[ "$target" == *-windows ]]; then exe="trolley.exe"; fi
     cli="{{ justfile_directory() }}/target/$rust_target/release/$exe"
     runtime="{{ justfile_directory() }}/runtime/zig-out-release/bin/$exe"
+    sanity="{{ justfile_directory() }}/tests/sanity"
 
     test_dir="{{ justfile_directory() }}/.sanity-test"
     rm -rf "$test_dir"
@@ -457,21 +460,63 @@ sanity-test *flags:
         echo "Error: --version output '$cli_version' does not match expected '$expected'" >&2; exit 1
     fi
 
-    echo "==> trolley init .sanity-test/project"
-    "$cli" init "$test_dir/project"
+    # --- scaffold check ----------------------------------------------------
+    # What `trolley init` writes is asserted on as written, and none of it is
+    # packaged. Packaging uses the committed fixture below instead, so the
+    # scaffold's text layout no longer decides what this test covers.
+    echo "==> trolley init .sanity-test/scaffold"
+    "$cli" init "$test_dir/scaffold"
 
-    if [ ! -f "$test_dir/project/trolley.toml" ]; then
+    if [ ! -f "$test_dir/scaffold/trolley.toml" ]; then
         echo "Error: trolley.toml was not created" >&2; exit 1
     fi
 
-    # Two-word display name so the rename layer is observable: cargo-packager's
-    # default AppImage/dmg/NSIS names differ from the composed Project_Sanity_*
-    # names, so a broken rename fails the dist listing diff on every OS.
-    # (sed -i.bak + rm is portable across GNU and BSD sed.)
-    sed -i.bak 's/^display_name = .*/display_name = "Project Sanity"/' "$test_dir/project/trolley.toml" && rm "$test_dir/project/trolley.toml.bak"
+    # A fresh scaffold names a TUI binary that cannot exist yet, so `package`
+    # is expected to fail — but only after the manifest has been read: the
+    # command loads and validates the config (parse, then the linux category
+    # name-match against cargo-packager's list) before it looks for the binary.
+    # Reaching that one error is the assertion. It proves the uncommented
+    # manifest parses and validates, and that it declares a binary for this
+    # target — a scaffold missing that entry fails with a different message.
+    # The commented-out examples are checked by `commands::init::tests`.
+    # Nothing is written: the command exits before it creates an output dir.
+    scaffold_log="$test_dir/scaffold.log"
+    if "$cli" package --bundle-only --config "$test_dir/scaffold/trolley.toml" >"$scaffold_log" 2>&1; then
+        echo "Error: packaging the scaffold succeeded, so this no longer asserts anything" >&2
+        sed 's/^/  /' "$scaffold_log" >&2
+        exit 1
+    fi
+    # Not grep -q: it exits at the first match, the producer dies of SIGPIPE,
+    # and pipefail turns that into a false failure.
+    if ! grep -F "TUI binary not found at" "$scaffold_log" >/dev/null; then
+        echo "Error: the scaffold manifest did not load and validate:" >&2
+        sed 's/^/  /' "$scaffold_log" >&2
+        exit 1
+    fi
 
+    # --- packaging check ---------------------------------------------------
+    # Packaged from a committed fixture rather than a rewritten scaffold: the
+    # file under tests/sanity/manifests/ is the readable, reviewable statement
+    # of what this test packages. One per OS, because each target deliberately
+    # exercises a different set of inputs — see the comments in each file.
+    case "$target" in
+        *-linux)   fixture="linux" ;;
+        *-macos)   fixture="macos" ;;
+        *-windows) fixture="windows" ;;
+        *)         echo "Error: no sanity fixture for $target" >&2; exit 1 ;;
+    esac
+    echo "==> packaging tests/sanity/manifests/$fixture.toml"
     mkdir -p "$test_dir/project/path/to"
+    cp "$sanity/manifests/$fixture.toml" "$test_dir/project/trolley.toml"
     cp "$cli" "$test_dir/project/path/to/project"
+    # The icon each fixture names, resolved relative to the manifest.
+    if [[ "$target" == *-linux ]]; then
+        cp "$sanity/icon.png" "$test_dir/project/icon.png"
+        # CI runners have no FUSE; tell linuxdeploy to self-extract instead
+        export APPIMAGE_EXTRACT_AND_RUN=1
+    elif [[ "$target" == *-windows ]]; then
+        cp "$sanity/icon.ico" "$test_dir/project/icon.ico"
+    fi
 
     echo "==> trolley package --bundle-only"
     TROLLEY_RUNTIME_SOURCE="$runtime" \
@@ -483,32 +528,11 @@ sanity-test *flags:
     # contract, so a mismatch here is a breaking change.
     echo "==> trolley package (default formats)"
     arch="${target%%-*}"
-    if [[ "$target" == *-linux ]]; then
-        # AppImage requires a square icon; give the init project one.
-        cp "{{ justfile_directory() }}/tests/sanity/icon.png" "$test_dir/project/icon.png"
-        sed -i '/^\[app\]$/a icons = ["icon.png"]' "$test_dir/project/trolley.toml"
-        # A file association and a category, so the .desktop assertions below
-        # have something to find. The scaffold emits a [linux] header with
-        # category commented out; a real one goes right after the header.
-        sed -i '/^\[app\]$/a file_associations = [{ extensions = ["snty"], mime_type = "text/x-sanity", description = "Sanity document", role = "editor" }]' "$test_dir/project/trolley.toml"
-        sed -i '/^\[linux\]$/a category = "Utility"' "$test_dir/project/trolley.toml"
-        # CI runners have no FUSE; tell linuxdeploy to self-extract instead
-        export APPIMAGE_EXTRACT_AND_RUN=1
-    elif [[ "$target" == *-windows ]]; then
-        # Must be a real .ico: parse_ico validates the header, and the icon
-        # assertions below need an image Windows can actually draw.
-        cp "{{ justfile_directory() }}/tests/sanity/icon.ico" "$test_dir/project/icon.ico"
-        sed -i '/^\[app\]$/a icons = ["icon.ico"]' "$test_dir/project/trolley.toml"
-        # The same association the Linux branch injects, so makensis actually
-        # compiles the file-association block and the .nsi assertion below has
-        # something to find.
-        sed -i '/^\[app\]$/a file_associations = [{ extensions = ["snty"], mime_type = "text/x-sanity", description = "Sanity document", role = "editor" }]' "$test_dir/project/trolley.toml"
-    fi
     TROLLEY_RUNTIME_SOURCE="$runtime" \
         "$cli" package --config "$test_dir/project/trolley.toml" | tee "$test_dir/package.log"
 
     dist="$test_dir/project/trolley/build/com.example.project/$target/dist"
-    snap="{{ justfile_directory() }}/tests/sanity/listings/${target}.list"
+    snap="$sanity/listings/${target}.list"
     actual=$(cd "$dist" && LC_ALL=C ls -A | LC_ALL=C sort)
     if [ -n "$bless" ]; then
         printf '%s\n' "$actual" > "$snap"
@@ -540,7 +564,11 @@ sanity-test *flags:
             echo "Error: deb is missing $icon_path" >&2
             exit 1
         fi
-        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$icon_path" >/dev/null; then
+        # rpm opens its package database even to query a file, and the system
+        # one is missing or unwritable on hosts that are not rpm-based.
+        rpmdb="$test_dir/rpmdb"
+        mkdir -p "$rpmdb"
+        if ! rpm -qlp --dbpath "$rpmdb" "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$icon_path" >/dev/null; then
             echo "Error: rpm is missing /$icon_path" >&2
             exit 1
         fi
@@ -550,26 +578,120 @@ sanity-test *flags:
             exit 1
         fi
 
-        # The .desktop entry carries the file association and the category.
-        # Only the deb's contents are read: rpm's entry is pinned byte-for-byte
-        # by the desktop_entry unit tests, and extracting from an rpm would need
-        # tools the CI runners do not have.
+        # The .desktop entry carries the file association and the category, and
+        # both packages render their own copy, so both are read back here.
         desktop_path="usr/share/applications/project.desktop"
         # Leading * in the pattern so it matches whether or not the member is
         # stored with a ./ prefix. `-f -` because tar's default archive is a
         # compiled-in device that $TAPE overrides. `|| true` so a missing member
         # reports the message below instead of tar's.
         deb_desktop=$(dpkg-deb --fsys-tarfile "$dist/project_0.1.0_${deb_arch}.deb" | tar -xO -f - --wildcards "*$desktop_path" || true)
-        if ! rpm -qlp "$dist/project-0.1.0.${arch}.rpm" | grep -F "/$desktop_path" >/dev/null; then
+        rpm_file="$dist/project-0.1.0.${arch}.rpm"
+        if ! rpm -qlp --dbpath "$rpmdb" "$rpm_file" | grep -F "/$desktop_path" >/dev/null; then
             echo "Error: rpm is missing /$desktop_path" >&2
             exit 1
         fi
+        # rpm2archive, not rpm2cpio: it hands the payload to the same tar the
+        # deb line above uses, whereas cpio is on none of the runners. It ships
+        # in the package `rpm` itself depends on, so if `rpm -qlp` got this far
+        # and this is missing, the environment is broken — say so rather than
+        # quietly falling back to the presence check above.
+        if ! command -v rpm2archive >/dev/null 2>&1; then
+            echo "Error: rpm2archive not found; cannot read $desktop_path out of the rpm" >&2
+            echo "  Debian/Ubuntu: apt install rpm2cpio (which rpm depends on)   Fedora: ships with rpm" >&2
+            exit 1
+        fi
+        # `-` reads the rpm from stdin and writes the archive to stdout. -z
+        # spelled out because rpm2archive always gzips unless given -n, and
+        # tar only sniffs compression on a seekable archive, never on a pipe.
+        rpm_desktop=$(rpm2archive - < "$rpm_file" | tar -xzO -f - --wildcards "*$desktop_path" || true)
         for line in "Exec=project %F" "MimeType=text/x-sanity" "Categories=Utility;"; do
             if ! printf '%s\n' "$deb_desktop" | grep -F "$line" >/dev/null; then
                 echo "Error: deb $desktop_path is missing '$line'" >&2
                 exit 1
             fi
+            if ! printf '%s\n' "$rpm_desktop" | grep -F "$line" >/dev/null; then
+                echo "Error: rpm /$desktop_path is missing '$line'" >&2
+                exit 1
+            fi
         done
+
+        # The mime XML takes two routes into the packages, cargo-packager's
+        # `files` for deb, pacman and AppImage and trolley's own rpm writer, so
+        # every package's copy is read back. All four are checked before
+        # failing: which of them lack it tells the routes apart.
+        mime_path="usr/share/mime/packages/project.xml"
+        mime_dir="$test_dir/mime"
+        mkdir -p "$mime_dir"
+        # Extracted the way the .desktop is above, into a file per package.
+        # `|| true` so a missing member leaves an empty file, reported below.
+        dpkg-deb --fsys-tarfile "$dist/project_0.1.0_${deb_arch}.deb" | tar -xO -f - --wildcards "*$mime_path" > "$mime_dir/deb" || true
+        rpm2archive - < "$rpm_file" | tar -xzO -f - --wildcards "*$mime_path" > "$mime_dir/rpm" || true
+        # The pacman tarball is the package's file tree itself.
+        tar -xzO -f "$dist/project_0.1.0_${arch}.tar.gz" --wildcards "*$mime_path" > "$mime_dir/pacman" || true
+        (cd "$test_dir" && "$dist/Project_Sanity_0.1.0_${arch}.AppImage" --appimage-extract "$mime_path" >/dev/null) || true
+        cat "$test_dir/squashfs-root/$mime_path" > "$mime_dir/AppImage" 2>/dev/null || true
+        mime_failed=""
+        for pkg in deb rpm pacman AppImage; do
+            if [ ! -s "$mime_dir/$pkg" ]; then
+                echo "Error: $pkg is missing /$mime_path" >&2
+                mime_failed=1
+                continue
+            fi
+            for line in '<mime-type type="text/x-sanity">' '<glob pattern="*.snty"/>' '<sub-class-of type="text/plain"/>'; do
+                if ! grep -F "$line" "$mime_dir/$pkg" >/dev/null; then
+                    echo "Error: $pkg /$mime_path is missing '$line'" >&2
+                    mime_failed=1
+                fi
+            done
+        done
+        if [ -n "$mime_failed" ]; then
+            exit 1
+        fi
+    fi
+    if [[ "$target" == *-macos ]]; then
+        # The associations reach the bundle as an Info.plist overlay that
+        # replaces cargo-packager's own keys, so the merged file is read back.
+        # Converted to JSON once so every key, including the dotted tag names,
+        # is addressed exactly; plutil reads binary and XML plists alike.
+        info_plist="$dist/Project Sanity.app/Contents/Info.plist"
+        plist_json="$test_dir/Info.plist.json"
+        just _require-jq
+        if ! plutil -convert json -o "$plist_json" "$info_plist"; then
+            echo "Error: could not read $info_plist" >&2
+            exit 1
+        fi
+        # All checked before failing, as with the mime XML above. `jq -e` fails
+        # on false, null and on a jq error (a missing key it indexes into).
+        plist_failed=""
+        plist_check() {
+            if ! jq -e "$2" "$plist_json" >/dev/null; then
+                echo "Error: Info.plist $1" >&2
+                plist_failed=1
+            fi
+        }
+        plist_check "CFBundleDocumentTypes does not have one entry per association (2)" \
+            '.CFBundleDocumentTypes | length == 2'
+        plist_check "CFBundleDocumentTypes has no Viewer entry for extensions md, markdown" \
+            '.CFBundleDocumentTypes | any(.CFBundleTypeExtensions == ["md", "markdown"] and .CFBundleTypeRole == "Viewer")'
+        plist_check "CFBundleDocumentTypes has no Owner entry for com.example.project.snty by LSItemContentTypes alone" \
+            '.CFBundleDocumentTypes | any(.LSItemContentTypes == ["com.example.project.snty"] and .LSHandlerRank == "Owner" and .CFBundleTypeRole == "Editor" and (has("CFBundleTypeExtensions") | not))'
+        plist_check "CFBundleDocumentTypes has an entry without CFBundleTypeIconSystemGenerated = 1" \
+            '.CFBundleDocumentTypes | all(.CFBundleTypeIconSystemGenerated == 1)'
+        plist_check "UTExportedTypeDeclarations does not declare exactly com.example.project.snty" \
+            '[.UTExportedTypeDeclarations[].UTTypeIdentifier] == ["com.example.project.snty"]'
+        plist_check "UTExportedTypeDeclarations com.example.project.snty is not described as 'Sanity document'" \
+            '.UTExportedTypeDeclarations[0].UTTypeDescription == "Sanity document"'
+        plist_check "UTExportedTypeDeclarations com.example.project.snty does not have extension snty" \
+            '.UTExportedTypeDeclarations[0].UTTypeTagSpecification["public.filename-extension"] == ["snty"]'
+        plist_check "UTExportedTypeDeclarations com.example.project.snty has tags other than public.filename-extension" \
+            '.UTExportedTypeDeclarations[0].UTTypeTagSpecification | keys == ["public.filename-extension"]'
+        plist_check "UTExportedTypeDeclarations com.example.project.snty does not conform to public.plain-text" \
+            '.UTExportedTypeDeclarations[0].UTTypeConformsTo == ["public.plain-text"]'
+        if [ -n "$plist_failed" ]; then
+            jq . "$plist_json" | sed 's/^/  /' >&2
+            exit 1
+        fi
     fi
     if [[ "$target" == *-windows ]]; then
         bundle="$test_dir/project/trolley/build/com.example.project/$target/bundle"
