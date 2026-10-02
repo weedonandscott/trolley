@@ -68,7 +68,15 @@ fn main() -> Result<()> {
             let tui_binary =
                 commands::common::resolve_tui_binary(&ctx.project_dir, &ctx.config, &target)?;
             let runtime = commands::common::resolve_runtime(&target)?;
-            commands::package::run(&ctx, target, &tui_binary, &runtime, bundle_only, formats, skip_failed_formats)?;
+            commands::package::run(
+                &ctx,
+                target,
+                &tui_binary,
+                &runtime,
+                bundle_only,
+                formats,
+                skip_failed_formats,
+            )?;
             Ok(())
         }
         Command::Run { config } => {

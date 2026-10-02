@@ -504,7 +504,10 @@ pub fn copy_shader_to_bundle(shader: &BundledPath, output_dir: &Path) -> Result<
     Ok(())
 }
 
-pub fn copy_data_path_to_bundle(data_path: &BundledPath, output_dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn copy_data_path_to_bundle(
+    data_path: &BundledPath,
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>> {
     let dest = output_dir.join(&data_path.relative_path);
     if data_path.absolute_path.is_dir() {
         let mut copied_files = Vec::new();
@@ -712,8 +715,7 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
         std::fs::remove_dir_all(&staging)
             .with_context(|| format!("clearing an unfinished download at {}", staging.display()))?;
     }
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("creating {}", staging.display()))?;
+    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
 
     eprintln!("Downloading trolley runtime for {target}...");
     eprintln!("  {url}");
@@ -974,7 +976,10 @@ mod tests {
         let windows = runtime_required_files(&Target::X86_64Windows);
         assert!(windows.contains(&"trolley.exe"));
         for name in WINDOWS_CONSOLE_HOST_FILENAMES {
-            assert!(windows.contains(&name), "{name} should gate a Windows cache hit");
+            assert!(
+                windows.contains(&name),
+                "{name} should gate a Windows cache hit"
+            );
         }
 
         let linux = runtime_required_files(&Target::X86_64Linux);
@@ -1295,8 +1300,15 @@ mod tests {
         let shaders = resolve_shaders(dir.path(), &manifest).unwrap();
         assert_eq!(shaders.len(), 2);
         assert_eq!(shaders[0].relative_path, PathBuf::from("shaders/crt.glsl"));
-        assert_eq!(shaders[1].relative_path, PathBuf::from("shaders/bloom.glsl"));
-        assert!(shaders.iter().all(|shader| shader.absolute_path.is_absolute()));
+        assert_eq!(
+            shaders[1].relative_path,
+            PathBuf::from("shaders/bloom.glsl")
+        );
+        assert!(
+            shaders
+                .iter()
+                .all(|shader| shader.absolute_path.is_absolute())
+        );
     }
 
     #[test]
@@ -1335,7 +1347,10 @@ mod tests {
         let data_paths = resolve_data_paths(dir.path(), &manifest).unwrap();
         assert_eq!(data_paths.len(), 2);
         assert_eq!(data_paths[0].relative_path, PathBuf::from("assets"));
-        assert_eq!(data_paths[1].relative_path, PathBuf::from("config/defaults.json"));
+        assert_eq!(
+            data_paths[1].relative_path,
+            PathBuf::from("config/defaults.json")
+        );
         assert!(data_paths[0].absolute_path.is_dir());
         assert!(data_paths[1].absolute_path.is_file());
     }
@@ -1376,7 +1391,9 @@ mod tests {
         extract_tar_xz_flat(io::Cursor::new(FIXTURE), dir.path()).unwrap();
 
         let payload = std::fs::read_to_string(dir.path().join("trolley")).unwrap();
-        let expected = "trolley runtime payload line, repeated so the xz stream has something to compress\n".repeat(64);
+        let expected =
+            "trolley runtime payload line, repeated so the xz stream has something to compress\n"
+                .repeat(64);
         assert_eq!(payload, expected);
 
         // `nested/extra.txt` in the archive: runtime tarballs are no longer

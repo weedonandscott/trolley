@@ -1138,12 +1138,16 @@ impl Config {
         // min must not exceed max
         if let (Some(min), Some(max)) = (self.gui.min_width, self.gui.max_width) {
             if min > max {
-                errors.push(format!("[gui] min_width ({min}) must not exceed max_width ({max})"));
+                errors.push(format!(
+                    "[gui] min_width ({min}) must not exceed max_width ({max})"
+                ));
             }
         }
         if let (Some(min), Some(max)) = (self.gui.min_height, self.gui.max_height) {
             if min > max {
-                errors.push(format!("[gui] min_height ({min}) must not exceed max_height ({max})"));
+                errors.push(format!(
+                    "[gui] min_height ({min}) must not exceed max_height ({max})"
+                ));
             }
         }
 
@@ -1168,7 +1172,9 @@ impl Config {
             }
             if let Some(max) = self.gui.max_width {
                 if w > max {
-                    errors.push(format!("[gui] width ({w}) must not exceed max_width ({max})"));
+                    errors.push(format!(
+                        "[gui] width ({w}) must not exceed max_width ({max})"
+                    ));
                 }
             }
         }
@@ -1182,7 +1188,9 @@ impl Config {
             }
             if let Some(max) = self.gui.max_height {
                 if h > max {
-                    errors.push(format!("[gui] height ({h}) must not exceed max_height ({max})"));
+                    errors.push(format!(
+                        "[gui] height ({h}) must not exceed max_height ({max})"
+                    ));
                 }
             }
         }

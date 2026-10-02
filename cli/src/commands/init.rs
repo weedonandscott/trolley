@@ -140,7 +140,7 @@ fn render(dir_name: &str) -> Result<String> {
 
     // Generate commented-out [fonts] example.
     // We write this manually rather than serializing a Fonts struct because
-    // toml::to_string_pretty expands the families array into [[families]]
+    // toml::to_string_pretty expands the families array into [[fonts.families]]
     // syntax, but we want the compact inline format.
     let fonts_block = "\n\
         # Fonts are loaded in order — first match per codepoint wins.\n\

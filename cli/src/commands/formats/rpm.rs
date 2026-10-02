@@ -57,9 +57,7 @@ fn resolve_png_icons(config: &Config, project_dir: &Path) -> Result<Vec<PathBuf>
     let mut pngs = Vec::new();
     for pattern in &config.app.icons {
         let pattern = &anchored_glob_pattern(project_dir, pattern);
-        for entry in glob::glob(pattern)
-            .with_context(|| format!("invalid icon glob: {pattern}"))?
-        {
+        for entry in glob::glob(pattern).with_context(|| format!("invalid icon glob: {pattern}"))? {
             let path = entry.with_context(|| format!("reading icon glob: {pattern}"))?;
             if path.extension() == Some(OsStr::new("png")) {
                 pngs.push(path);
@@ -71,10 +69,10 @@ fn resolve_png_icons(config: &Config, project_dir: &Path) -> Result<Vec<PathBuf>
 
 /// Read PNG dimensions from file header.
 fn png_dimensions(path: &Path) -> Result<(u32, u32)> {
-    let file = File::open(path)
-        .with_context(|| format!("opening icon {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("opening icon {}", path.display()))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let reader = decoder.read_info()
+    let reader = decoder
+        .read_info()
         .with_context(|| format!("reading PNG header of {}", path.display()))?;
     let info = reader.info();
     Ok((info.width, info.height))
@@ -121,9 +119,8 @@ pub fn build(
         arch,
         &config.app.display_name,
     );
-    builder.using_config(
-        rpm::BuildConfig::default().compression(rpm::CompressionWithLevel::Gzip(6)),
-    );
+    builder
+        .using_config(rpm::BuildConfig::default().compression(rpm::CompressionWithLevel::Gzip(6)));
 
     // Add the install prefix directory
     builder.with_dir_entry(FileOptions::dir(install_prefix).mode(FileMode::dir(0o755)))?;
@@ -169,16 +166,18 @@ pub fn build(
     }
     builder.with_file(
         &wrapper_path,
-        FileOptions::new(format!("/usr/bin/{}", config.app.slug))
-            .mode(FileMode::regular(0o755)),
+        FileOptions::new(format!("/usr/bin/{}", config.app.slug)).mode(FileMode::regular(0o755)),
     )?;
 
     // Desktop entry; distro file triggers pick up the mime associations, so no
     // post-install script (deb and pacman rely on the same).
     builder.with_file_contents(
         desktop_entry(config, parse_linux_category(config)?),
-        FileOptions::new(format!("/usr/share/applications/{}.desktop", config.app.slug))
-            .mode(FileMode::regular(0o644)),
+        FileOptions::new(format!(
+            "/usr/share/applications/{}.desktop",
+            config.app.slug
+        ))
+        .mode(FileMode::regular(0o644)),
     )?;
 
     // Types the manifest opted into defining. Picked up by the same triggers.

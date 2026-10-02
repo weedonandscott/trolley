@@ -538,9 +538,15 @@ pub fn run_packager(
     std::fs::create_dir_all(&work_dir)
         .with_context(|| format!("creating packager staging dir {}", work_dir.display()))?;
 
-    let packager_config =
-        build_packager_config(config, project_dir, bundle_dir, &work_dir, manifest, formats)
-            .context("building cargo-packager config")?;
+    let packager_config = build_packager_config(
+        config,
+        project_dir,
+        bundle_dir,
+        &work_dir,
+        manifest,
+        formats,
+    )
+    .context("building cargo-packager config")?;
 
     let outputs =
         cargo_packager::package(&packager_config).context("cargo-packager packaging failed")?;
