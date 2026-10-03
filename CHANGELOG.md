@@ -4,6 +4,12 @@
 
 ### Runtime
 
+### CLI
+
+## 0.12.0
+
+### Runtime
+
 - [all] New `[gui]` option `maximized = true`, which starts the window
         maximized on all three platforms; the manifest is rejected if it is
         combined with `resizable = false` or with `max_width`/`max_height`
