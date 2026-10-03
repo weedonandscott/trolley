@@ -8,6 +8,15 @@
         maximized on all three platforms; the manifest is rejected if it is
         combined with `resizable = false` or with `max_width`/`max_height`
 
+### CLI
+
+- [all] New `file_associations` in `[linux]`, `[macos]` and `[windows]`:
+        double-clicking a declared file type opens the app, which receives
+        the file paths in `TROLLEY_OPEN_PATHS`
+- [linux] **BREAKING:** `[linux.appimage] categories` is now `[linux]
+        category`. The old key never had any effect
+- [linux] RPM packages now ship a `.desktop` entry, like deb and pacman
+
 ## 0.11.0
 
 ### Runtime

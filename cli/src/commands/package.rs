@@ -112,7 +112,9 @@ pub fn run(
             .resources
             .extend(common::copy_data_path_to_bundle(data_path, &bundle_dir)?);
     }
-    if target.is_windows() && let Some(icon_path) = &windows_icon {
+    if target.is_windows()
+        && let Some(icon_path) = &windows_icon
+    {
         common::copy_windows_icon_to_bundle(icon_path, &bundle_dir)?;
         manifest
             .resources
@@ -157,7 +159,9 @@ pub fn run(
                 .with_context(|| format!("copying {name} to {}", bundle_dir.display()))?;
         }
     }
-    let stamped_runtime_icon = if target.is_windows() && let Some(icon_path) = &windows_icon {
+    let stamped_runtime_icon = if target.is_windows()
+        && let Some(icon_path) = &windows_icon
+    {
         super::windows_exe_icon::stamp_exe_icon(&bundled_runtime, icon_path).with_context(|| {
             format!(
                 "stamping Windows app icon into {}",
@@ -236,7 +240,10 @@ pub fn run(
         println!("  {}  (embedded data)", data_path.relative_path.display());
     }
     if target.is_windows() && windows_icon.is_some() {
-        println!("  {}  (Windows app icon)", common::windows_icon_filename_str());
+        println!(
+            "  {}  (Windows app icon)",
+            common::windows_icon_filename_str()
+        );
         if stamped_runtime_icon {
             println!("  {}  (Windows exe icon stamped)", manifest.runtime_name);
         } else {
@@ -249,7 +256,15 @@ pub fn run(
     // Build packages unless bundle-only
     if !bundle_only && !planned.is_empty() {
         println!();
-        super::formats::build_formats(&planned, &ctx.project_dir, &bundle_dir, &dist_dir, &ctx.config, &manifest, skip_failed_formats)?;
+        super::formats::build_formats(
+            &planned,
+            &ctx.project_dir,
+            &bundle_dir,
+            &dist_dir,
+            &ctx.config,
+            &manifest,
+            skip_failed_formats,
+        )?;
     }
 
     Ok(bundle_dir)

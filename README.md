@@ -170,6 +170,21 @@ If you need full shell quoting or arguments containing spaces, you must fall
 back to `[ghostty].command` and accept shell semantics. `args` cannot be used
 together with `[ghostty].command`.
 
+`[linux] category` sets the desktop menu section the app appears under
+(`Categories=` in the `.desktop` entry):
+
+```toml
+[linux]
+binaries = { x86_64 = "path/to/binary" }
+category = "Developer Tool"
+```
+
+Accepted values, ignoring case, spaces and hyphens: `Business`, `Developer
+Tool`, `Education`, `Entertainment`, `Finance`, `Game` and its sub-genres,
+`Graphics and Design`, `Healthcare and Fitness`, `Lifestyle`, `Medical`,
+`Music`, `News`, `Photography`, `Productivity`, `Reference`, `Social
+Networking`, `Sports`, `Travel`, `Utility`, `Video`, `Weather`.
+
 On Windows, 1ms timer resolution is enabled by default instead of the usual
 ~15.6ms. This reduces timer jitter and can improve animation smoothness, but
 might slightly increase CPU usage. Set `precise_timer = false` to opt out.
@@ -179,6 +194,105 @@ might slightly increase CPU usage. Set `precise_timer = false` to opt out.
 binaries = { x86_64 = "path/to/app.exe" }
 precise_timer = false
 ```
+
+#### File associations
+
+Each platform section lists the file types the app opens there:
+
+```toml
+[linux]
+file_associations = [
+  # A type the system already knows
+  { extensions = ["md", "markdown"], mime_type = "text/markdown" },
+  # A custom type
+  { extensions = ["myapp"], mime_type = "application/x-myapp", mime_info = { comment = "MyApp document" } },
+]
+
+[macos]
+file_associations = [
+  { extensions = ["md", "markdown"], role = "editor" },
+  { extensions = ["myapp"], role = "editor", exported_type = { identifier = "com.example.myapp.document", description = "MyApp document" } },
+]
+
+[windows]
+file_associations = [
+  { extensions = ["md", "markdown"], description = "Markdown document" },
+  { extensions = ["myapp"], description = "MyApp document" },
+]
+```
+
+| Section     | Field           | Required | Description |
+|-------------|-----------------|----------|-------------|
+| all         | `extensions`    | yes      | Without the dot: `gz`, not `.gz` or `tar.gz`; each in one entry per section |
+| all         | `unique`        | no       | `true` marks the extensions as meant for this platform only |
+| `[linux]`   | `mime_type`     | yes      | E.g. `text/markdown`; one entry per mime type |
+| `[linux]`   | `mime_info`     | no       | `{ comment, sub_class_of }`: defines a custom type |
+| `[macos]`   | `role`          | yes      | `editor`, `viewer`, `shell`, `ql_generator` or `none`. `none` means the app does not open the type |
+| `[macos]`   | `exported_type` | no       | `{ identifier, description, conforms_to, mime_type }`: defines a custom type |
+| `[windows]` | `description`   | yes      | The type's name in Explorer |
+
+On Linux, outside `mime_info`, `extensions` do not change which files open the
+app: the system decides by mime type. They only declare intent and are compared
+with the other platforms.
+
+##### Custom types
+
+Linux picks the app by mime type, and knows only the types defined on the
+system. Without `mime_info`, a `.myapp` file is detected as plain text and does
+not open in the app:
+
+```toml
+mime_info = { comment = "MyApp document" }
+# sub_class_of if apply. In this example, text editors are offered too
+mime_info = { comment = "MyApp document", sub_class_of = ["text/plain"] }
+```
+
+macOS picks the app by extension, so a custom type opens without a definition.
+`exported_type` gives it a name in Finder:
+
+```toml
+exported_type = { identifier = "com.example.myapp.document", description = "MyApp document" }
+exported_type = { identifier = "com.example.myapp.document", description = "MyApp document", conforms_to = ["public.plain-text"] }
+```
+
+`identifier` is reverse-DNS under a domain you own. `conforms_to` defaults to
+`public.data`.
+
+The fields mirror the file they generate: `mime_info` the shared-mime-info XML
+(`comment` → `<comment>`, `sub_class_of` → `<sub-class-of>`), `exported_type`
+Info.plist's `UTExportedTypeDeclarations` (`identifier` → `UTTypeIdentifier`,
+`description` → `UTTypeDescription`, `conforms_to` → `UTTypeConformsTo`,
+`mime_type` → the `public.mime-type` tag).
+
+Leave `mime_info` and `exported_type` off for types the system already knows:
+the definition merges into the system's, changing the type for every app.
+
+##### Where it lands
+
+| Platform                 | Where |
+|--------------------------|-------|
+| Linux (deb, rpm, pacman) | `MimeType=` in the `.desktop` entry; with `mime_info`, also `/usr/share/mime/packages/<slug>.xml` |
+| Linux (AppImage)         | Same files inside the AppImage, but running it installs nothing, so no association unless a desktop-integration tool installs them |
+| Windows (NSIS)           | `Software\Classes` registry entries |
+| macOS (app, dmg)         | `CFBundleDocumentTypes` in `Info.plist`; with `exported_type`, also `UTExportedTypeDeclarations` |
+
+##### `TROLLEY_OPEN_PATHS`
+
+The app is handed the opened files in `TROLLEY_OPEN_PATHS`, one absolute path
+per line, e.g. `/home/me/notes.myapp`. It is unset on a normal launch.
+
+- Windows starts one instance per file; Linux and macOS may pass several files
+  at once.
+- Relative paths are made absolute without resolving symlinks or checking that
+  they exist.
+- On macOS, opening a file while the app is running shows a "could not be
+  opened" error.
+
+##### Known issues on Windows
+
+- Uninstalling leaves the associations behind, pointing at the deleted app.
+- The registry's open command has the app's path unquoted.
+- Explorer may not notice a new association until the next login.
 
 #### Code signing -- optional
 

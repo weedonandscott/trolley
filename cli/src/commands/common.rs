@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use trolley_config::{Config, ENVIRONMENT_DEFAULTS, FontFamily, Target};
+use trolley_config::{Config, ENVIRONMENT_DEFAULTS, FontFamily, Target, open_paths_var_str};
 
 pub const VERSION: &str = env!("TROLLEY_VERSION");
 
@@ -53,6 +53,10 @@ impl ProjectContext {
             .context("config file has no parent directory")?
             .to_path_buf();
         let config = Config::load(&config_path)?;
+        // Name-matched against cargo-packager's category list, which the config
+        // crate cannot see; fail here so every command rejects a bad value.
+        super::formats::packager_common::parse_linux_category(&config)
+            .with_context(|| format!("validating {}", config_path.display()))?;
         let output_dir = match output {
             Some(p) => PathBuf::from(p),
             None => project_dir.join("trolley"),
@@ -500,7 +504,10 @@ pub fn copy_shader_to_bundle(shader: &BundledPath, output_dir: &Path) -> Result<
     Ok(())
 }
 
-pub fn copy_data_path_to_bundle(data_path: &BundledPath, output_dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn copy_data_path_to_bundle(
+    data_path: &BundledPath,
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>> {
     let dest = output_dir.join(&data_path.relative_path);
     if data_path.absolute_path.is_dir() {
         let mut copied_files = Vec::new();
@@ -708,8 +715,7 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
         std::fs::remove_dir_all(&staging)
             .with_context(|| format!("clearing an unfinished download at {}", staging.display()))?;
     }
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("creating {}", staging.display()))?;
+    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
 
     eprintln!("Downloading trolley runtime for {target}...");
     eprintln!("  {url}");
@@ -758,7 +764,25 @@ fn resolve_runtime_from_url(url: url::Url, target: &Target) -> Result<PathBuf> {
 /// 2. env_file contents (parsed by dotenvy)
 /// 3. Inline `[environment] variables` from manifest
 pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u8>> {
+    let (buf, warnings) = assemble_environment_with_warnings(project_dir, config)?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(buf)
+}
+
+fn assemble_environment_with_warnings(
+    project_dir: &Path,
+    config: &Config,
+) -> Result<(Vec<u8>, Vec<String>)> {
     let mut vars: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut warnings = Vec::new();
+    let open_paths_var = open_paths_var_str();
+    let open_paths_warning = |source: &str| {
+        format!(
+            "{source} sets {open_paths_var}, which trolley sets itself to the files the app was opened with; remove it"
+        )
+    };
 
     // 1. Defaults
     for (key, value) in ENVIRONMENT_DEFAULTS {
@@ -773,6 +797,9 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
         {
             let (key, value) =
                 item.with_context(|| format!("parsing env_file {}", env_path.display()))?;
+            if key == open_paths_var {
+                warnings.push(open_paths_warning(&format!("env_file {env_file}")));
+            }
             vars.insert(key, value);
         }
     }
@@ -788,6 +815,9 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
             .join("\n");
         for item in dotenvy::from_read_iter(inline.as_bytes()) {
             let (key, value) = item.context("parsing [environment] variables")?;
+            if key == open_paths_var {
+                warnings.push(open_paths_warning("[environment] variables"));
+            }
             vars.insert(key, value);
         }
     }
@@ -796,7 +826,7 @@ pub fn assemble_environment(project_dir: &Path, config: &Config) -> Result<Vec<u
     for (key, value) in &vars {
         write!(buf, "{key}={value}\n")?;
     }
-    Ok(buf)
+    Ok((buf, warnings))
 }
 
 // ---------------------------------------------------------------------------
@@ -902,7 +932,8 @@ mod tests {
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
                 args: Vec::new(),
-                appimage: None,
+                category: None,
+                file_associations: Vec::new(),
             }),
             macos: None,
             windows: None,
@@ -945,7 +976,10 @@ mod tests {
         let windows = runtime_required_files(&Target::X86_64Windows);
         assert!(windows.contains(&"trolley.exe"));
         for name in WINDOWS_CONSOLE_HOST_FILENAMES {
-            assert!(windows.contains(&name), "{name} should gate a Windows cache hit");
+            assert!(
+                windows.contains(&name),
+                "{name} should gate a Windows cache hit"
+            );
         }
 
         let linux = runtime_required_files(&Target::X86_64Linux);
@@ -1029,6 +1063,38 @@ mod tests {
         manifest.environment.env_file = Some("nonexistent.env".into());
         let result = assemble_environment(dir.path(), &manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn environment_warns_when_open_paths_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "TROLLEY_OPEN_PATHS=/a\n").unwrap();
+        let mut manifest = test_manifest();
+        manifest.environment.env_file = Some(".env".into());
+        manifest
+            .environment
+            .variables
+            .insert("TROLLEY_OPEN_PATHS".into(), "/b".into());
+        let (_, warnings) = assemble_environment_with_warnings(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            warnings,
+            vec![
+                "env_file .env sets TROLLEY_OPEN_PATHS, which trolley sets itself to the files the app was opened with; remove it",
+                "[environment] variables sets TROLLEY_OPEN_PATHS, which trolley sets itself to the files the app was opened with; remove it",
+            ]
+        );
+    }
+
+    #[test]
+    fn environment_without_open_paths_has_no_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = test_manifest();
+        manifest
+            .environment
+            .variables
+            .insert("FOO".into(), "bar".into());
+        let (_, warnings) = assemble_environment_with_warnings(dir.path(), &manifest).unwrap();
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -1234,8 +1300,15 @@ mod tests {
         let shaders = resolve_shaders(dir.path(), &manifest).unwrap();
         assert_eq!(shaders.len(), 2);
         assert_eq!(shaders[0].relative_path, PathBuf::from("shaders/crt.glsl"));
-        assert_eq!(shaders[1].relative_path, PathBuf::from("shaders/bloom.glsl"));
-        assert!(shaders.iter().all(|shader| shader.absolute_path.is_absolute()));
+        assert_eq!(
+            shaders[1].relative_path,
+            PathBuf::from("shaders/bloom.glsl")
+        );
+        assert!(
+            shaders
+                .iter()
+                .all(|shader| shader.absolute_path.is_absolute())
+        );
     }
 
     #[test]
@@ -1274,7 +1347,10 @@ mod tests {
         let data_paths = resolve_data_paths(dir.path(), &manifest).unwrap();
         assert_eq!(data_paths.len(), 2);
         assert_eq!(data_paths[0].relative_path, PathBuf::from("assets"));
-        assert_eq!(data_paths[1].relative_path, PathBuf::from("config/defaults.json"));
+        assert_eq!(
+            data_paths[1].relative_path,
+            PathBuf::from("config/defaults.json")
+        );
         assert!(data_paths[0].absolute_path.is_dir());
         assert!(data_paths[1].absolute_path.is_file());
     }
@@ -1315,7 +1391,9 @@ mod tests {
         extract_tar_xz_flat(io::Cursor::new(FIXTURE), dir.path()).unwrap();
 
         let payload = std::fs::read_to_string(dir.path().join("trolley")).unwrap();
-        let expected = "trolley runtime payload line, repeated so the xz stream has something to compress\n".repeat(64);
+        let expected =
+            "trolley runtime payload line, repeated so the xz stream has something to compress\n"
+                .repeat(64);
         assert_eq!(payload, expected);
 
         // `nested/extra.txt` in the archive: runtime tarballs are no longer

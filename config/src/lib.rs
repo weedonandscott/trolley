@@ -445,6 +445,102 @@ pub struct App {
     pub icons: Vec<String>,
 }
 
+/// A file type the Linux packages register the app for. Linux matches files by
+/// `mime_type` alone; `extensions` take effect only through `mime_info`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxFileAssociation {
+    pub extensions: Vec<String>,
+    pub mime_type: String,
+    /// Exempts the extensions from the cross-platform comparison.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unique: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_info: Option<LinuxMimeInfo>,
+}
+
+/// Defines the association's mime type by shipping a `shared-mime-info` XML in
+/// the Linux packages; the fields mirror its elements.
+///
+/// Absent means the type is only referenced, which is what a type the system
+/// already defines needs. Defining one it already defines adds extensions to
+/// it for every app on the machine, and can replace its name depending on
+/// install order.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    expecting = "a table such as `{ comment = \"My document\" }`, optionally with `sub_class_of`"
+)]
+pub struct LinuxMimeInfo {
+    /// `<comment>`: the type's name in the file manager.
+    pub comment: String,
+    /// `<sub-class-of>`: types the new one inherits from, e.g. `text/plain`.
+    /// Without them, apps that handle a parent are not offered for these files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_class_of: Vec<String>,
+}
+
+/// A file type the macOS app bundle registers the app for, by extension.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosFileAssociation {
+    pub extensions: Vec<String>,
+    pub role: FileAssociationRole,
+    /// Exempts the extensions from the cross-platform comparison.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unique: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exported_type: Option<MacosExportedType>,
+}
+
+/// Exports the association as a Uniform Type Identifier from the macOS app
+/// bundle; the fields mirror an `UTExportedTypeDeclarations` entry.
+///
+/// Absent leaves the association matched by extension alone, which is what a
+/// type macOS already knows needs.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    expecting = "a table such as `{ identifier = \"com.example.myapp.doc\", \
+                 description = \"My document\" }`, optionally with `conforms_to` and `mime_type`"
+)]
+pub struct MacosExportedType {
+    /// `UTTypeIdentifier`, in reverse-DNS form under the developer's own domain.
+    pub identifier: String,
+    /// `UTTypeDescription`: the type's name in Finder.
+    pub description: String,
+    /// `UTTypeConformsTo`, e.g. `public.plain-text`. Empty means `public.data`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conforms_to: Vec<String>,
+    /// The `public.mime-type` tag, e.g. `application/x-myapp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// A file type the Windows installer registers the app for, by extension.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsFileAssociation {
+    pub extensions: Vec<String>,
+    /// The type's name in Explorer.
+    pub description: String,
+    /// Exempts the extensions from the cross-platform comparison.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unique: bool,
+}
+
+/// The app's role with respect to an associated file type on macOS. `None`
+/// declares the app is not a handler for the type there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAssociationRole {
+    Editor,
+    Viewer,
+    Shell,
+    QlGenerator,
+    None,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Gui {
@@ -553,8 +649,13 @@ pub struct Linux {
     pub binaries: BTreeMap<Arch, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Freedesktop application category (e.g. `"Utility"`, `"Developer Tool"`),
+    /// one of the accepted names listed in the README, ignoring case, spaces and
+    /// hyphens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub appimage: Option<AppImageConfig>,
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_associations: Vec<LinuxFileAssociation>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -565,6 +666,8 @@ pub struct Macos {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<MacosSigning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_associations: Vec<MacosFileAssociation>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -581,13 +684,8 @@ pub struct Windows {
     pub precise_timer: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<WindowsSigning>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AppImageConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub categories: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_associations: Vec<WindowsFileAssociation>,
 }
 
 /// macOS code-signing / notarization settings (non-secret selectors only).
@@ -695,6 +793,199 @@ impl Config {
         Some(args.as_slice())
     }
 
+    pub fn linux_file_associations(&self) -> &[LinuxFileAssociation] {
+        self.linux.as_ref().map_or(&[], |l| &l.file_associations)
+    }
+
+    pub fn macos_file_associations(&self) -> &[MacosFileAssociation] {
+        self.macos.as_ref().map_or(&[], |m| &m.file_associations)
+    }
+
+    pub fn windows_file_associations(&self) -> &[WindowsFileAssociation] {
+        self.windows.as_ref().map_or(&[], |w| &w.file_associations)
+    }
+
+    /// Extensions opened on one present platform but not on another, and
+    /// `unique` extensions opened elsewhere anyway. Advisory: a platform may
+    /// leave a type out on purpose.
+    pub fn file_association_warnings(&self) -> Vec<String> {
+        /// One association's extensions, and whether they are `unique`.
+        struct Entry<'a> {
+            extensions: &'a [String],
+            unique: bool,
+        }
+        fn entries<'a, T: 'a>(
+            list: impl IntoIterator<Item = &'a T>,
+            fields: impl Fn(&'a T) -> (&'a [String], bool),
+        ) -> Vec<Entry<'a>> {
+            list.into_iter()
+                .map(|a| {
+                    let (extensions, unique) = fields(a);
+                    Entry { extensions, unique }
+                })
+                .collect()
+        }
+        let platforms: Vec<(&str, Vec<Entry>)> = [
+            self.linux.as_ref().map(|l| {
+                let list = entries(&l.file_associations, |a| (&a.extensions, a.unique));
+                ("linux", list)
+            }),
+            self.macos.as_ref().map(|m| {
+                // Role `none` declares the app does not open the type.
+                let opened = m
+                    .file_associations
+                    .iter()
+                    .filter(|a| a.role != FileAssociationRole::None);
+                ("macos", entries(opened, |a| (&a.extensions, a.unique)))
+            }),
+            self.windows.as_ref().map(|w| {
+                let list = entries(&w.file_associations, |a| (&a.extensions, a.unique));
+                ("windows", list)
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let opens = |list: &[Entry], ext: &str| {
+            list.iter()
+                .any(|entry| entry.extensions.iter().any(|e| e == ext))
+        };
+        let mut warnings = Vec::new();
+        for (platform, list) in &platforms {
+            for &Entry { extensions, unique } in list {
+                for ext in extensions {
+                    for (other, other_list) in platforms.iter().filter(|(o, _)| o != platform) {
+                        match (unique, opens(other_list, ext)) {
+                            (false, false) => warnings.push(format!(
+                                "extension \"{ext}\" is opened on {platform} but not on \
+                                 {other}; add it there, or set unique = true"
+                            )),
+                            (true, true) => warnings.push(format!(
+                                "extension \"{ext}\" is unique to {platform} but is also \
+                                 opened on {other}; remove it from {other}, or drop \
+                                 unique = true"
+                            )),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        warnings
+    }
+
+    /// Each platform's list is checked on its own; the comparison across
+    /// platforms is `file_association_warnings`.
+    fn validate_file_associations(&self, errors: &mut Vec<String>) {
+        {
+            let mut claimed = BTreeMap::new();
+            // One entry per mime type: Linux keys everything on the type, so a
+            // second entry could not take effect there. Keyed lowercased: mime
+            // types are case-insensitive.
+            let mut mime_types: BTreeMap<String, usize> = BTreeMap::new();
+            for (i, association) in self.linux_file_associations().iter().enumerate() {
+                let label = format!("[linux] file_associations[{i}]");
+                validate_extensions(&label, i, &association.extensions, &mut claimed, errors);
+                let mime = &association.mime_type;
+                validate_mime_type(&label, "mime_type", mime, errors);
+                let lower = mime.to_ascii_lowercase();
+                if let Some(&first) = mime_types.get(&lower) {
+                    errors.push(format!(
+                        "{label}: mime_type \"{mime}\" is already used by \
+                         file_associations[{first}]; list these extensions there, or give \
+                         them a mime type of their own"
+                    ));
+                } else {
+                    mime_types.insert(lower, i);
+                }
+                if let Some(mime_info) = &association.mime_info {
+                    validate_description(&label, "mime_info.comment", &mime_info.comment, errors);
+                    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+                    for (j, parent) in mime_info.sub_class_of.iter().enumerate() {
+                        let field = format!("mime_info.sub_class_of[{j}]");
+                        validate_mime_type(&label, &field, parent, errors);
+                        let lower = parent.to_ascii_lowercase();
+                        if let Some(&first) = seen.get(&lower) {
+                            errors.push(format!(
+                                "{label}: {field} \"{parent}\" duplicates mime_info.sub_class_of[{first}]"
+                            ));
+                        } else {
+                            seen.insert(lower, j);
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut claimed = BTreeMap::new();
+            // Keyed lowercased: macOS compares type identifiers case-insensitively.
+            let mut utis: BTreeMap<String, usize> = BTreeMap::new();
+            for (i, association) in self.macos_file_associations().iter().enumerate() {
+                let label = format!("[macos] file_associations[{i}]");
+                validate_extensions(&label, i, &association.extensions, &mut claimed, errors);
+                let Some(exported) = &association.exported_type else {
+                    continue;
+                };
+                let identifier = &exported.identifier;
+                let field = "exported_type.identifier";
+                if validate_uti(&label, field, identifier, errors) {
+                    let lower = identifier.to_ascii_lowercase();
+                    if lower.starts_with("public.") || lower.starts_with("com.apple.") {
+                        errors.push(format!(
+                            "{label}: {field} \"{identifier}\" is in a namespace Apple \
+                             owns (\"public.\", \"com.apple.\"); use one under your own \
+                             domain, such as \"{}.document\"",
+                            self.app.identifier
+                        ));
+                    }
+                    if let Some(&first) = utis.get(&lower) {
+                        errors.push(format!(
+                            "{label}: {field} \"{identifier}\" is already used by \
+                             file_associations[{first}]"
+                        ));
+                    } else {
+                        utis.insert(lower, i);
+                    }
+                }
+                validate_description(
+                    &label,
+                    "exported_type.description",
+                    &exported.description,
+                    errors,
+                );
+                if let Some(mime) = &exported.mime_type {
+                    validate_mime_type(&label, "exported_type.mime_type", mime, errors);
+                }
+                let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+                for (j, parent) in exported.conforms_to.iter().enumerate() {
+                    let field = format!("exported_type.conforms_to[{j}]");
+                    if !validate_uti(&label, &field, parent, errors) {
+                        continue;
+                    }
+                    let lower = parent.to_ascii_lowercase();
+                    if let Some(&first) = seen.get(&lower) {
+                        errors.push(format!(
+                            "{label}: {field} \"{parent}\" duplicates exported_type.conforms_to[{first}]"
+                        ));
+                    } else {
+                        seen.insert(lower, j);
+                    }
+                }
+            }
+        }
+
+        {
+            let mut claimed = BTreeMap::new();
+            for (i, association) in self.windows_file_associations().iter().enumerate() {
+                let label = format!("[windows] file_associations[{i}]");
+                validate_extensions(&label, i, &association.extensions, &mut claimed, errors);
+                validate_description(&label, "description", &association.description, errors);
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
@@ -718,6 +1009,8 @@ impl Config {
             errors.push("[app] version must not be empty".into());
         }
 
+        self.validate_file_associations(&mut errors);
+
         // At least one platform section must be present
         if self.linux.is_none() && self.macos.is_none() && self.windows.is_none() {
             errors.push(
@@ -737,6 +1030,11 @@ impl Config {
                 }
             }
             validate_platform_args("[linux]", &linux.args, &mut errors);
+            // Only blankness here — the name match lives in the CLI, where
+            // cargo-packager's AppCategory is available.
+            if matches!(&linux.category, Some(c) if c.trim().is_empty()) {
+                errors.push("[linux] category must not be empty".into());
+            }
         }
         if let Some(ref macos) = self.macos {
             if macos.binaries.is_empty() {
@@ -840,12 +1138,16 @@ impl Config {
         // min must not exceed max
         if let (Some(min), Some(max)) = (self.gui.min_width, self.gui.max_width) {
             if min > max {
-                errors.push(format!("[gui] min_width ({min}) must not exceed max_width ({max})"));
+                errors.push(format!(
+                    "[gui] min_width ({min}) must not exceed max_width ({max})"
+                ));
             }
         }
         if let (Some(min), Some(max)) = (self.gui.min_height, self.gui.max_height) {
             if min > max {
-                errors.push(format!("[gui] min_height ({min}) must not exceed max_height ({max})"));
+                errors.push(format!(
+                    "[gui] min_height ({min}) must not exceed max_height ({max})"
+                ));
             }
         }
 
@@ -870,7 +1172,9 @@ impl Config {
             }
             if let Some(max) = self.gui.max_width {
                 if w > max {
-                    errors.push(format!("[gui] width ({w}) must not exceed max_width ({max})"));
+                    errors.push(format!(
+                        "[gui] width ({w}) must not exceed max_width ({max})"
+                    ));
                 }
             }
         }
@@ -884,7 +1188,9 @@ impl Config {
             }
             if let Some(max) = self.gui.max_height {
                 if h > max {
-                    errors.push(format!("[gui] height ({h}) must not exceed max_height ({max})"));
+                    errors.push(format!(
+                        "[gui] height ({h}) must not exceed max_height ({max})"
+                    ));
                 }
             }
         }
@@ -1140,6 +1446,159 @@ fn validate_display_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Validate a file-association extension.
+///
+/// Every backend writes the extension verbatim into a registry class, a glob,
+/// or a plist, so the accepted set is the intersection: lowercase ASCII
+/// alphanumerics plus `+-_`. No dots: Windows matches only a filename's last
+/// extension.
+fn validate_file_extension(ext: &str) -> std::result::Result<(), String> {
+    if ext.is_empty() {
+        return Err("extensions must not contain an empty string".into());
+    }
+    if ext.starts_with('.') {
+        return Err(format!(
+            "extension \"{ext}\" must not start with '.' (use \"md\", not \".md\")"
+        ));
+    }
+    if ext.chars().any(char::is_whitespace) {
+        return Err(format!("extension \"{ext}\" must not contain whitespace"));
+    }
+    if ext.contains('.') {
+        let last = ext.rsplit('.').next().unwrap_or(ext);
+        return Err(format!(
+            "extension \"{ext}\" must not contain '.': Windows matches only the last \
+             extension of a filename, so use \"{last}\""
+        ));
+    }
+    if !ext
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '-' | '_'))
+    {
+        return Err(format!(
+            "extension \"{ext}\" must contain only lowercase ASCII alphanumeric characters \
+             and '+', '-', '_'"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate one entry's extensions, recording each in `claimed` so a later
+/// entry in the same platform list cannot claim it again.
+fn validate_extensions<'a>(
+    label: &str,
+    index: usize,
+    extensions: &'a [String],
+    claimed: &mut BTreeMap<&'a str, usize>,
+    errors: &mut Vec<String>,
+) {
+    if extensions.is_empty() {
+        errors.push(format!("{label}: extensions must not be empty"));
+    }
+    for ext in extensions {
+        if let Err(e) = validate_file_extension(ext) {
+            errors.push(format!("{label}: {e}"));
+            continue;
+        }
+        // Keep the first claimant: overwriting would make a third collision
+        // blame the second entry instead of the first.
+        if let Some(&first) = claimed.get(ext.as_str()) {
+            if first == index {
+                errors.push(format!(
+                    "{label}: extension \"{ext}\" is listed more than once in the same \
+                     association"
+                ));
+            } else {
+                errors.push(format!(
+                    "{label}: extension \"{ext}\" is already claimed by \
+                     file_associations[{first}]"
+                ));
+            }
+        } else {
+            claimed.insert(ext.as_str(), index);
+        }
+    }
+}
+
+/// Validate a file type's display name, with `field` naming the value.
+fn validate_description(label: &str, field: &str, value: &str, errors: &mut Vec<String>) {
+    if value.trim().is_empty() {
+        errors.push(format!("{label}: {field} must not be empty"));
+    }
+    // XML 1.0 cannot carry most control characters even escaped, and every
+    // target shows the name on one line.
+    if value.chars().any(char::is_control) {
+        errors.push(format!(
+            "{label}: {field} must not contain control characters such as line breaks or \
+             tabs; it is shown as a one-line name"
+        ));
+    }
+}
+
+/// Validate a Uniform Type Identifier's shape, with `field` naming the value
+/// being checked. Returns whether it is well formed.
+fn validate_uti(label: &str, field: &str, value: &str, errors: &mut Vec<String>) -> bool {
+    if value.trim().is_empty() {
+        errors.push(format!("{label}: {field} must not be empty"));
+        return false;
+    }
+    // Apple's UTI syntax is wider; this is the reverse-DNS subset that type
+    // identifiers use in practice.
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        errors.push(format!(
+            "{label}: {field} \"{value}\" must contain only ASCII letters, digits, '.' and '-'"
+        ));
+        return false;
+    }
+    if !value.contains('.') || value.split('.').any(str::is_empty) {
+        errors.push(format!(
+            "{label}: {field} \"{value}\" must be a reverse-DNS name such as \
+             \"com.example.myapp.document\": at least two dot-separated parts, none empty"
+        ));
+        return false;
+    }
+    true
+}
+
+/// Validate a mime type against RFC 6838 (`type/subtype`, no parameters).
+/// Shared by `mime_type` and `mime_info.sub_class_of`, with `field` naming
+/// whichever is being checked.
+fn validate_mime_type(label: &str, field: &str, value: &str, errors: &mut Vec<String>) {
+    // Blank would otherwise reach the shape check and be reported as
+    // malformed, which reads as a typo rather than an omission.
+    if value.trim().is_empty() {
+        errors.push(format!("{label}: {field} must not be empty"));
+        return;
+    }
+    let Some((top, sub)) = value
+        .split_once('/')
+        .filter(|(t, s)| !t.is_empty() && !s.is_empty() && !s.contains('/'))
+    else {
+        errors.push(format!(
+            "{label}: {field} \"{value}\" must be of the form \"type/subtype\""
+        ));
+        return;
+    };
+    if !is_restricted_name(top) || !is_restricted_name(sub) {
+        errors.push(format!(
+            "{label}: {field} \"{value}\" must have a type and subtype of 1-127 characters \
+             each, starting with a letter or digit and otherwise only letters, digits and \
+             ! # $ & - ^ _ . + (RFC 6838; no parameters or whitespace)"
+        ));
+    }
+}
+
+/// RFC 6838 `restricted-name`.
+fn is_restricted_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 127
+        && chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+}
+
 fn validate_platform_args(section: &str, args: &[String], errors: &mut Vec<String>) {
     for (index, arg) in args.iter().enumerate() {
         if arg.is_empty() {
@@ -1213,6 +1672,24 @@ pub fn windows_icon_filename_str() -> &'static str {
 #[unsafe(no_mangle)]
 pub extern "C" fn trolley_windows_icon_filename() -> *const c_char {
     WINDOWS_ICON_FILENAME.as_ptr()
+}
+
+/// Single source of truth for the variable the runtime sets to the files the
+/// app was opened with; reached only through the two accessors below.
+const OPEN_PATHS_VAR: &CStr = c"TROLLEY_OPEN_PATHS";
+
+/// The open-paths variable name as a Rust `&str` (no trailing NUL), used by
+/// the packager to warn when a manifest sets it. The runtimes read the same
+/// name through [`trolley_open_paths_var`].
+pub fn open_paths_var_str() -> &'static str {
+    OPEN_PATHS_VAR.to_str().expect("OPEN_PATHS_VAR is ASCII")
+}
+
+/// C/Zig/Swift accessor: the open-paths variable name as a NUL-terminated
+/// string. The Rust packager reads the same name through [`open_paths_var_str`].
+#[unsafe(no_mangle)]
+pub extern "C" fn trolley_open_paths_var() -> *const c_char {
+    OPEN_PATHS_VAR.as_ptr()
 }
 
 #[repr(C)]
@@ -1347,7 +1824,8 @@ mod tests {
             linux: Some(Linux {
                 binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
                 args: Vec::new(),
-                appimage: None,
+                category: None,
+                file_associations: Vec::new(),
             }),
             macos: None,
             windows: None,
@@ -1799,7 +2277,8 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
         m.linux = Some(Linux {
             binaries: BTreeMap::new(),
             args: Vec::new(),
-            appimage: None,
+            category: None,
+            file_associations: Vec::new(),
         });
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("[linux] binaries must not be empty"));
@@ -1811,7 +2290,8 @@ signing = { identity = "Developer ID Application: ACME (TEAM)", entitlements = "
         m.linux = Some(Linux {
             binaries: BTreeMap::from([(Arch::X86_64, "  ".into())]),
             args: Vec::new(),
-            appimage: None,
+            category: None,
+            file_associations: Vec::new(),
         });
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("[linux] binary path for x86_64 must not be empty"));
@@ -2595,11 +3075,11 @@ binaries = { x86_64 = "my-app" }
     }
 
     // -----------------------------------------------------------------------
-    // AppImageConfig
+    // Linux category
     // -----------------------------------------------------------------------
 
     #[test]
-    fn appimage_config_roundtrip() {
+    fn linux_category_roundtrip() {
         let toml_str = r#"
 [app]
 identifier = "com.example.test"
@@ -2609,15 +3089,1197 @@ version = "1.0.0"
 
 [linux]
 binaries = { x86_64 = "my-app" }
-
-[linux.appimage]
-categories = "Utility"
+category = "Utility"
 "#;
         let manifest: Config = toml::from_str(toml_str).unwrap();
         let linux = manifest.linux.as_ref().unwrap();
-        let appimage = linux.appimage.as_ref().unwrap();
-        assert_eq!(appimage.categories.as_deref(), Some("Utility"));
+        assert_eq!(linux.category.as_deref(), Some("Utility"));
         assert!(linux.args.is_empty());
+    }
+
+    #[test]
+    fn validate_linux_category_blank() {
+        let mut m = minimal_manifest();
+        m.linux.as_mut().unwrap().category = Some("  ".into());
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("[linux] category must not be empty"));
+    }
+
+    // -----------------------------------------------------------------------
+    // File associations
+    // -----------------------------------------------------------------------
+
+    fn parse(sections: &str) -> std::result::Result<Config, toml::de::Error> {
+        toml::from_str(&format!(
+            r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+
+{sections}"#
+        ))
+    }
+
+    #[test]
+    fn file_associations_roundtrip() {
+        let manifest = parse(
+            r#"
+[linux]
+binaries = { x86_64 = "my-app" }
+file_associations = [
+  { extensions = ["md", "markdown"], mime_type = "text/markdown" },
+  { extensions = ["snty"], mime_type = "text/x-sanity", unique = true, mime_info = { comment = "Sanity document", sub_class_of = ["text/plain"] } },
+]
+
+[macos]
+binaries = { x86_64 = "my-app" }
+file_associations = [
+  { extensions = ["md", "markdown"], role = "editor" },
+  { extensions = ["ql"], role = "ql_generator", exported_type = { identifier = "com.example.test.ql", description = "QL query" } },
+]
+
+[windows]
+binaries = { x86_64 = "my-app" }
+file_associations = [
+  { extensions = ["md", "markdown"], description = "Markdown document" },
+]
+"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+
+        let linux = manifest.linux_file_associations();
+        assert_eq!(linux.len(), 2);
+        assert_eq!(linux[0].extensions, ["md", "markdown"]);
+        assert_eq!(linux[0].mime_type, "text/markdown");
+        assert!(!linux[0].unique);
+        assert_eq!(linux[0].mime_info, None);
+        assert!(linux[1].unique);
+        assert_eq!(
+            linux[1].mime_info,
+            Some(mime_info("Sanity document", &["text/plain"]))
+        );
+
+        let macos = manifest.macos_file_associations();
+        assert_eq!(macos[0].role, FileAssociationRole::Editor);
+        assert_eq!(macos[1].role, FileAssociationRole::QlGenerator);
+        assert_eq!(
+            macos[1].exported_type,
+            Some(exported_type("com.example.test.ql", "QL query", &[]))
+        );
+
+        let windows = manifest.windows_file_associations();
+        assert_eq!(windows[0].extensions, ["md", "markdown"]);
+        assert_eq!(windows[0].description, "Markdown document");
+
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        let reparsed: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            reparsed.linux_file_associations()[1].mime_info,
+            linux[1].mime_info,
+            "{serialized}"
+        );
+        assert!(reparsed.linux_file_associations()[1].unique, "{serialized}");
+        assert_eq!(
+            reparsed.macos_file_associations()[1].exported_type,
+            macos[1].exported_type,
+            "{serialized}"
+        );
+        assert_eq!(
+            reparsed.windows_file_associations()[0].description,
+            "Markdown document"
+        );
+    }
+
+    // Each platform takes only its own fields.
+    #[test]
+    fn file_association_fields_of_another_platform_are_rejected() {
+        for (sections, field) in [
+            (
+                r#"[linux]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], mime_type = "text/markdown", role = "editor" }]"#,
+                "role",
+            ),
+            (
+                r#"[linux]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], mime_type = "text/markdown", description = "Markdown" }]"#,
+                "description",
+            ),
+            (
+                r#"[macos]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], role = "editor", mime_type = "text/markdown" }]"#,
+                "mime_type",
+            ),
+            (
+                r#"[macos]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], role = "editor", description = "Markdown" }]"#,
+                "description",
+            ),
+            (
+                r#"[windows]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], description = "Markdown", role = "editor" }]"#,
+                "role",
+            ),
+            (
+                r#"[windows]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], description = "Markdown", mime_info = { comment = "Markdown" } }]"#,
+                "mime_info",
+            ),
+            (
+                r#"[linux]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], mime_type = "text/markdown", exported_type = { identifier = "com.example.md", description = "Markdown" } }]"#,
+                "exported_type",
+            ),
+            (
+                r#"[macos]
+binaries = { x86_64 = "my-app" }
+file_associations = [{ extensions = ["md"], role = "editor", mime_info = { comment = "Markdown" } }]"#,
+                "mime_info",
+            ),
+        ] {
+            let err = parse(sections).unwrap_err().to_string();
+            assert!(err.contains(&format!("unknown field `{field}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn app_file_associations_rejected() {
+        let err = toml::from_str::<Config>(
+            r#"
+[app]
+identifier = "com.example.test"
+display_name = "Test"
+slug = "test"
+version = "1.0.0"
+file_associations = [{ extensions = ["md"], mime_type = "text/markdown" }]
+
+[linux]
+binaries = { x86_64 = "my-app" }
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `file_associations`"), "{err}");
+    }
+
+    #[test]
+    fn file_association_required_fields() {
+        for (sections, missing) in [
+            (
+                "[linux]\nbinaries = { x86_64 = \"a\" }\nfile_associations = [{ extensions = [\"md\"] }]",
+                "mime_type",
+            ),
+            (
+                "[linux]\nbinaries = { x86_64 = \"a\" }\nfile_associations = [{ mime_type = \"text/markdown\" }]",
+                "extensions",
+            ),
+            (
+                "[macos]\nbinaries = { x86_64 = \"a\" }\nfile_associations = [{ extensions = [\"md\"] }]",
+                "role",
+            ),
+            (
+                "[windows]\nbinaries = { x86_64 = \"a\" }\nfile_associations = [{ extensions = [\"md\"] }]",
+                "description",
+            ),
+        ] {
+            let err = parse(sections).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("missing field `{missing}`")),
+                "{sections}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_associations_skip_when_default() {
+        let mut manifest = minimal_manifest();
+        manifest.macos = Some(macos_section(vec![]));
+        manifest.windows = Some(windows_section(vec![]));
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(!serialized.contains("file_associations"), "{serialized}");
+        assert!(!serialized.contains("category"), "{serialized}");
+
+        manifest.linux.as_mut().unwrap().file_associations =
+            vec![linux_association(&["md"], "text/markdown")];
+        let serialized = toml::to_string_pretty(&manifest).unwrap();
+        assert!(!serialized.contains("unique"), "{serialized}");
+        assert!(!serialized.contains("mime_info"), "{serialized}");
+    }
+
+    // -- helpers --
+
+    fn macos_section(file_associations: Vec<MacosFileAssociation>) -> Macos {
+        Macos {
+            binaries: BTreeMap::from([(Arch::X86_64, "my-app".into())]),
+            args: Vec::new(),
+            signing: None,
+            file_associations,
+        }
+    }
+
+    fn windows_section(file_associations: Vec<WindowsFileAssociation>) -> Windows {
+        Windows {
+            binaries: BTreeMap::from([(Arch::X86_64, "my-app.exe".into())]),
+            args: Vec::new(),
+            precise_timer: None,
+            signing: None,
+            file_associations,
+        }
+    }
+
+    fn linux_association(extensions: &[&str], mime_type: &str) -> LinuxFileAssociation {
+        LinuxFileAssociation {
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            mime_type: mime_type.into(),
+            unique: false,
+            mime_info: None,
+        }
+    }
+
+    fn macos_association(extensions: &[&str]) -> MacosFileAssociation {
+        MacosFileAssociation {
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            role: FileAssociationRole::Editor,
+            unique: false,
+            exported_type: None,
+        }
+    }
+
+    fn windows_association(extensions: &[&str]) -> WindowsFileAssociation {
+        WindowsFileAssociation {
+            extensions: extensions.iter().map(|e| (*e).into()).collect(),
+            description: "Plain text".into(),
+            unique: false,
+        }
+    }
+
+    fn mime_info(comment: &str, sub_class_of: &[&str]) -> LinuxMimeInfo {
+        LinuxMimeInfo {
+            comment: comment.into(),
+            sub_class_of: sub_class_of.iter().map(|p| (*p).into()).collect(),
+        }
+    }
+
+    fn exported_type(
+        identifier: &str,
+        description: &str,
+        conforms_to: &[&str],
+    ) -> MacosExportedType {
+        MacosExportedType {
+            identifier: identifier.into(),
+            description: description.into(),
+            conforms_to: conforms_to.iter().map(|p| (*p).into()).collect(),
+            mime_type: None,
+        }
+    }
+
+    fn with_linux(associations: Vec<LinuxFileAssociation>) -> Config {
+        let mut m = minimal_manifest();
+        m.linux.as_mut().unwrap().file_associations = associations;
+        m
+    }
+
+    fn with_macos(associations: Vec<MacosFileAssociation>) -> Config {
+        let mut m = minimal_manifest();
+        m.macos = Some(macos_section(associations));
+        m
+    }
+
+    fn with_windows(associations: Vec<WindowsFileAssociation>) -> Config {
+        let mut m = minimal_manifest();
+        m.windows = Some(windows_section(associations));
+        m
+    }
+
+    fn err_of(config: Config) -> String {
+        config.validate().unwrap_err().to_string()
+    }
+
+    fn linux_err(associations: Vec<LinuxFileAssociation>) -> String {
+        err_of(with_linux(associations))
+    }
+
+    fn defining_linux(mime_info: LinuxMimeInfo) -> LinuxFileAssociation {
+        let mut a = linux_association(&["snty"], "application/x-sanity");
+        a.mime_info = Some(mime_info);
+        a
+    }
+
+    fn defining_macos(exported_type: MacosExportedType) -> MacosFileAssociation {
+        let mut a = macos_association(&["snty"]);
+        a.exported_type = Some(exported_type);
+        a
+    }
+
+    // -- [linux] mime_info --
+
+    fn parse_mime_info(value: &str) -> std::result::Result<Config, toml::de::Error> {
+        parse(&format!(
+            r#"
+[linux]
+binaries = {{ x86_64 = "my-app" }}
+file_associations = [
+  {{ extensions = ["snty"], mime_type = "application/x-sanity", mime_info = {value} }},
+]
+"#
+        ))
+    }
+
+    fn mime_info_of(manifest: &Config) -> Option<&LinuxMimeInfo> {
+        manifest.linux_file_associations()[0].mime_info.as_ref()
+    }
+
+    #[test]
+    fn mime_info_forms() {
+        for (value, expected) in [
+            (
+                r#"{ comment = "Sanity document" }"#,
+                mime_info("Sanity document", &[]),
+            ),
+            (
+                r#"{ comment = "Sanity document", sub_class_of = [] }"#,
+                mime_info("Sanity document", &[]),
+            ),
+            (
+                r#"{ comment = "Sanity document", sub_class_of = ["text/plain", "application/x-foo"] }"#,
+                mime_info("Sanity document", &["text/plain", "application/x-foo"]),
+            ),
+        ] {
+            let manifest = parse_mime_info(value).unwrap();
+            assert_eq!(mime_info_of(&manifest), Some(&expected), "{value}");
+            manifest.validate().unwrap();
+            let serialized = toml::to_string_pretty(&manifest).unwrap();
+            let reparsed: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(
+                mime_info_of(&reparsed),
+                Some(&expected),
+                "{value}: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn mime_info_requires_comment() {
+        for (value, missing) in [
+            ("{}", "comment"),
+            (r#"{ sub_class_of = ["text/plain"] }"#, "comment"),
+        ] {
+            let err = parse_mime_info(value).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("missing field `{missing}`")),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mime_info_rejects_a_bare_bool() {
+        for value in ["true", "false"] {
+            let err = parse_mime_info(value).unwrap_err().to_string();
+            assert!(
+                err.contains(
+                    "expected a table such as `{ comment = \"My document\" }`, optionally \
+                     with `sub_class_of`"
+                ),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mime_info_unknown_key_rejected() {
+        for key in ["enabled = true", "parents = [\"text/plain\"]"] {
+            let err = parse_mime_info(&format!(r#"{{ comment = "Sanity document", {key} }}"#))
+                .unwrap_err()
+                .to_string();
+            let name = key.split_once(' ').unwrap().0;
+            assert!(err.contains(&format!("unknown field `{name}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn mime_info_sub_class_of_must_be_a_list() {
+        let err =
+            parse_mime_info(r#"{ comment = "Sanity document", sub_class_of = "text/plain" }"#)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("expected a sequence"), "{err}");
+    }
+
+    #[test]
+    fn validate_mime_info_sub_class_of_shape_names_the_index() {
+        let err = linux_err(vec![defining_linux(mime_info(
+            "Sanity document",
+            &["text/plain", "text plain"],
+        ))]);
+        assert!(
+            err.contains(
+                "[linux] file_associations[0]: mime_info.sub_class_of[1] \"text plain\" must be of the \
+                 form \"type/subtype\""
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("sub_class_of[0]"), "{err}");
+    }
+
+    #[test]
+    fn validate_mime_info_sub_class_of_follows_rfc_6838() {
+        let err = linux_err(vec![defining_linux(mime_info(
+            "Sanity document",
+            &["text/x-a&b", "text/pl\"ain"],
+        ))]);
+        assert!(
+            err.contains(
+                "[linux] file_associations[0]: mime_info.sub_class_of[1] \"text/pl\"ain\" must have a \
+                 type and subtype of 1-127 characters each"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("sub_class_of[0]"), "{err}");
+    }
+
+    #[test]
+    fn validate_mime_info_sub_class_of_rejects_empty() {
+        let err = linux_err(vec![defining_linux(mime_info("Sanity document", &[""]))]);
+        assert!(
+            err.contains(
+                "[linux] file_associations[0]: mime_info.sub_class_of[0] must not be empty"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_mime_info_duplicate_sub_class_of() {
+        for (sub_class_of, message) in [
+            (
+                &["text/plain", "application/x-foo", "text/plain"][..],
+                "mime_info.sub_class_of[2] \"text/plain\" duplicates mime_info.sub_class_of[0]",
+            ),
+            (
+                &["text/x-foo", "Text/X-Foo"][..],
+                "mime_info.sub_class_of[1] \"Text/X-Foo\" duplicates mime_info.sub_class_of[0]",
+            ),
+        ] {
+            let err = linux_err(vec![defining_linux(mime_info(
+                "Sanity document",
+                sub_class_of,
+            ))]);
+            assert!(
+                err.contains(&format!("[linux] file_associations[0]: {message}")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_mime_info_blank_comment() {
+        let err = linux_err(vec![defining_linux(mime_info("   ", &[]))]);
+        assert!(
+            err.contains("[linux] file_associations[0]: mime_info.comment must not be empty"),
+            "{err}"
+        );
+    }
+
+    // -- [macos] exported_type --
+
+    fn parse_exported_type(value: &str) -> std::result::Result<Config, toml::de::Error> {
+        parse(&format!(
+            r#"
+[macos]
+binaries = {{ x86_64 = "my-app" }}
+file_associations = [
+  {{ extensions = ["snty"], role = "editor", exported_type = {value} }},
+]
+"#
+        ))
+    }
+
+    fn exported_type_of(manifest: &Config) -> Option<&MacosExportedType> {
+        manifest.macos_file_associations()[0].exported_type.as_ref()
+    }
+
+    #[test]
+    fn exported_type_forms() {
+        let id = "com.example.test.snty";
+        for (value, expected) in [
+            (
+                r#"{ identifier = "com.example.test.snty", description = "Sanity document" }"#,
+                exported_type(id, "Sanity document", &[]),
+            ),
+            (
+                r#"{ identifier = "com.example.test.snty", description = "Sanity document", conforms_to = [] }"#,
+                exported_type(id, "Sanity document", &[]),
+            ),
+            (
+                r#"{ identifier = "com.example.test.snty", description = "Sanity document", conforms_to = ["public.plain-text", "public.data"] }"#,
+                exported_type(id, "Sanity document", &["public.plain-text", "public.data"]),
+            ),
+            (
+                r#"{ identifier = "com.example.test.snty", description = "Sanity document", mime_type = "application/x-sanity" }"#,
+                MacosExportedType {
+                    mime_type: Some("application/x-sanity".into()),
+                    ..exported_type(id, "Sanity document", &[])
+                },
+            ),
+        ] {
+            let manifest = parse_exported_type(value).unwrap();
+            assert_eq!(exported_type_of(&manifest), Some(&expected), "{value}");
+            manifest.validate().unwrap();
+            let serialized = toml::to_string_pretty(&manifest).unwrap();
+            let reparsed: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(
+                exported_type_of(&reparsed),
+                Some(&expected),
+                "{value}: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn exported_type_requires_identifier_and_description() {
+        for (value, missing) in [
+            ("{}", "identifier"),
+            (r#"{ description = "Sanity document" }"#, "identifier"),
+            (r#"{ identifier = "com.example.test.snty" }"#, "description"),
+        ] {
+            let err = parse_exported_type(value).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("missing field `{missing}`")),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn exported_type_rejects_a_bare_bool() {
+        let err = parse_exported_type("true").unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "expected a table such as `{ identifier = \
+                 \"com.example.myapp.doc\", description = \"My document\" }`, optionally with \
+                 `conforms_to` and `mime_type`"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn exported_type_unknown_key_rejected() {
+        for key in ["enabled = true", "parents = [\"public.data\"]"] {
+            let err = parse_exported_type(&format!(
+                r#"{{ identifier = "com.example.test.snty", description = "Sanity document", {key} }}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            let name = key.split_once(' ').unwrap().0;
+            assert!(err.contains(&format!("unknown field `{name}`")), "{err}");
+        }
+    }
+
+    fn macos_err(exported_type: MacosExportedType) -> String {
+        err_of(with_macos(vec![defining_macos(exported_type)]))
+    }
+
+    #[test]
+    fn validate_exported_type_identifier_shape() {
+        for (identifier, message) in [
+            ("", "exported_type.identifier must not be empty".to_string()),
+            (
+                "com.example.my_app",
+                "exported_type.identifier \"com.example.my_app\" must contain only ASCII letters, \
+                 digits, '.' and '-'"
+                    .into(),
+            ),
+            (
+                "com.example.my app",
+                "exported_type.identifier \"com.example.my app\" must contain only ASCII letters, \
+                 digits, '.' and '-'"
+                    .into(),
+            ),
+            (
+                "com.exämple.doc",
+                "exported_type.identifier \"com.exämple.doc\" must contain only ASCII letters, \
+                 digits, '.' and '-'"
+                    .into(),
+            ),
+        ]
+        .into_iter()
+        .chain(
+            ["snty", ".com.example", "com.example.", "com..example"].map(|id| {
+                (
+                    id,
+                    format!(
+                        "exported_type.identifier \"{id}\" must be a reverse-DNS name such as \
+                         \"com.example.myapp.document\": at least two dot-separated parts, \
+                         none empty"
+                    ),
+                )
+            }),
+        ) {
+            let err = macos_err(exported_type(identifier, "Sanity document", &[]));
+            assert!(
+                err.contains(&format!("[macos] file_associations[0]: {message}")),
+                "{identifier}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_exported_type_identifier_rejects_apple_namespaces() {
+        for identifier in [
+            "public.snty",
+            "com.apple.snty",
+            "Public.snty",
+            "COM.APPLE.snty",
+        ] {
+            let err = macos_err(exported_type(identifier, "Sanity document", &[]));
+            assert!(
+                err.contains(&format!(
+                    "[macos] file_associations[0]: exported_type.identifier \"{identifier}\" is in a \
+                     namespace Apple owns (\"public.\", \"com.apple.\"); use one under your \
+                     own domain, such as \"com.example.test.document\""
+                )),
+                "{identifier}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_exported_type_accepts_hyphens_digits_and_case() {
+        with_macos(vec![defining_macos(exported_type(
+            "Com.Example-2.my-app.SNTY",
+            "Sanity document",
+            &["public.plain-text", "com.apple.package"],
+        ))])
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_exported_type_duplicate_identifier() {
+        let first = defining_macos(exported_type("com.example.test.doc", "Doc", &[]));
+        let mut second = defining_macos(exported_type("com.example.test.other", "B", &[]));
+        second.extensions = vec!["b".into()];
+        // Case-insensitive.
+        let mut third = defining_macos(exported_type("COM.example.test.doc", "C", &[]));
+        third.extensions = vec!["c".into()];
+        let err = err_of(with_macos(vec![first, second, third]));
+        assert!(
+            err.contains(
+                "[macos] file_associations[2]: exported_type.identifier \"COM.example.test.doc\" is \
+                 already used by file_associations[0]"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("file_associations[1]"), "{err}");
+    }
+
+    #[test]
+    fn validate_exported_type_conforms_to() {
+        let err = macos_err(exported_type(
+            "com.example.test.snty",
+            "Sanity document",
+            &[
+                "public.plain-text",
+                "public",
+                "public.text",
+                "Public.Plain-Text",
+                "",
+            ],
+        ));
+        for message in [
+            "exported_type.conforms_to[1] \"public\" must be a reverse-DNS name such as \
+             \"com.example.myapp.document\": at least two dot-separated parts, none empty",
+            "exported_type.conforms_to[3] \"Public.Plain-Text\" duplicates exported_type.conforms_to[0]",
+            "exported_type.conforms_to[4] must not be empty",
+        ] {
+            assert!(
+                err.contains(&format!("[macos] file_associations[0]: {message}")),
+                "{message}: {err}"
+            );
+        }
+        assert!(!err.contains("conforms_to[2]"), "{err}");
+    }
+
+    #[test]
+    fn validate_exported_type_mime_type() {
+        let with_mime = |mime: &str| MacosExportedType {
+            mime_type: Some(mime.into()),
+            ..exported_type("com.example.test.snty", "Sanity document", &[])
+        };
+        with_macos(vec![defining_macos(with_mime("application/x-sanity"))])
+            .validate()
+            .unwrap();
+        for bad in ["", "text/plain;charset=utf-8", "sanity"] {
+            let err = macos_err(with_mime(bad));
+            assert!(
+                err.contains("[macos] file_associations[0]: exported_type.mime_type"),
+                "{bad:?}: {err}"
+            );
+        }
+        let err = macos_err(with_mime("text/x<y>"));
+        assert!(
+            err.contains(&format!(
+                "[macos] file_associations[0]: exported_type.mime_type \"text/x<y>\" {NOT_RFC_6838}"
+            )),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_exported_type_blank_description() {
+        let err = macos_err(exported_type("com.example.test.snty", "", &[]));
+        assert!(
+            err.contains(
+                "[macos] file_associations[0]: exported_type.description must not be empty"
+            ),
+            "{err}"
+        );
+    }
+
+    // -- extensions, on every platform --
+
+    // Every platform's list runs the same extension rules, under its own label.
+    fn extension_errs(extensions: &[&str]) -> [String; 3] {
+        [
+            linux_err(vec![linux_association(extensions, "text/plain")]),
+            err_of(with_macos(vec![macos_association(extensions)])),
+            err_of(with_windows(vec![windows_association(extensions)])),
+        ]
+    }
+
+    fn assert_every_platform(extensions: &[&str], message: &str) {
+        for (platform, err) in ["linux", "macos", "windows"]
+            .into_iter()
+            .zip(extension_errs(extensions))
+        {
+            assert!(
+                err.contains(&format!("[{platform}] file_associations[0]: {message}")),
+                "{platform}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_association_empty_extensions() {
+        assert_every_platform(&[], "extensions must not be empty");
+    }
+
+    #[test]
+    fn validate_file_association_leading_dot() {
+        assert_every_platform(
+            &[".md"],
+            "extension \".md\" must not start with '.' (use \"md\", not \".md\")",
+        );
+    }
+
+    #[test]
+    fn validate_file_association_empty_extension_string() {
+        assert_every_platform(&[""], "extensions must not contain an empty string");
+    }
+
+    #[test]
+    fn validate_file_association_extension_with_whitespace() {
+        assert_every_platform(
+            &["my ext"],
+            "extension \"my ext\" must not contain whitespace",
+        );
+    }
+
+    #[test]
+    fn validate_file_association_uppercase_extension() {
+        assert_every_platform(
+            &["MD"],
+            "extension \"MD\" must contain only lowercase ASCII alphanumeric characters",
+        );
+    }
+
+    #[test]
+    fn validate_file_association_dotted_extension() {
+        assert_every_platform(
+            &["tar.gz"],
+            "extension \"tar.gz\" must not contain '.': Windows matches only the last \
+             extension of a filename, so use \"gz\"",
+        );
+    }
+
+    #[test]
+    fn validate_file_association_extension_duplicated_within_one_association() {
+        assert_every_platform(
+            &["md", "md"],
+            "extension \"md\" is listed more than once in the same association",
+        );
+    }
+
+    #[test]
+    fn validate_file_association_duplicate_extension() {
+        let linux = linux_err(vec![
+            linux_association(&["md"], "text/plain"),
+            linux_association(&["md"], "text/markdown"),
+        ]);
+        let macos = err_of(with_macos(vec![
+            macos_association(&["md"]),
+            macos_association(&["md"]),
+        ]));
+        let windows = err_of(with_windows(vec![
+            windows_association(&["md"]),
+            windows_association(&["md"]),
+        ]));
+        for (platform, err) in [("linux", linux), ("macos", macos), ("windows", windows)] {
+            assert!(
+                err.contains(&format!(
+                    "[{platform}] file_associations[1]: extension \"md\" is already claimed by \
+                     file_associations[0]"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_association_third_duplicate_names_the_first_claimant() {
+        let err = linux_err(vec![
+            linux_association(&["md"], "text/plain"),
+            linux_association(&["md"], "text/markdown"),
+            linux_association(&["md"], "text/x-markdown"),
+        ]);
+        assert!(err.contains(
+            "[linux] file_associations[2]: extension \"md\" is already claimed by \
+             file_associations[0]"
+        ));
+        assert!(!err.contains(
+            "[linux] file_associations[2]: extension \"md\" is already claimed by \
+             file_associations[1]"
+        ));
+    }
+
+    // Lists are separate: the same extension on several platforms is the
+    // normal case.
+    #[test]
+    fn same_extension_on_every_platform_is_valid() {
+        let mut m = with_linux(vec![linux_association(&["md"], "text/markdown")]);
+        m.macos = Some(macos_section(vec![macos_association(&["md"])]));
+        m.windows = Some(windows_section(vec![windows_association(&["md"])]));
+        m.validate().unwrap();
+    }
+
+    // -- [linux] mime_type --
+
+    #[test]
+    fn validate_file_association_shared_mime_type() {
+        for (first, second) in [("text/plain", "text/plain"), ("text/x-foo", "text/X-Foo")] {
+            let err = linux_err(vec![
+                linux_association(&["md"], first),
+                linux_association(&["csv"], second),
+            ]);
+            assert!(
+                err.contains(&format!(
+                    "[linux] file_associations[1]: mime_type \"{second}\" is already used by \
+                     file_associations[0]; list these extensions there, or give them a mime \
+                     type of their own"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_association_blank_mime_type() {
+        for blank in ["", "   "] {
+            let err = linux_err(vec![linux_association(&["md"], blank)]);
+            assert!(
+                err.contains("[linux] file_associations[0]: mime_type must not be empty"),
+                "{err}"
+            );
+            // The blank case must not also be reported as malformed.
+            assert!(!err.contains("type/subtype"), "{err}");
+        }
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_needs_slash() {
+        for bad in ["markdown", "/", "text/", "/markdown", "a/b/c"] {
+            let err = linux_err(vec![linux_association(&["md"], bad)]);
+            assert!(
+                err.contains("must be of the form \"type/subtype\""),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    const NOT_RFC_6838: &str = "must have a type and subtype of 1-127 characters each, starting \
+                                with a letter or digit and otherwise only letters, digits and \
+                                ! # $ & - ^ _ . + (RFC 6838; no parameters or whitespace)";
+
+    fn mime_type_err(mime_type: &str) -> Option<String> {
+        with_linux(vec![linux_association(&["md"], mime_type)])
+            .validate()
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_accepts_rfc_6838_names() {
+        let longest = format!("application/{}", "x".repeat(127));
+        for good in [
+            "text/markdown",
+            "a/b",
+            "application/vnd.ms-excel",
+            "application/atom+xml",
+            "text/x-c++src",
+            "application/x-a&b",
+            "application/x-a!#$^_.+-z",
+            "1/2",
+            longest.as_str(),
+        ] {
+            assert_eq!(mime_type_err(good), None, "rejected {good:?}");
+        }
+    }
+
+    #[test]
+    fn validate_file_association_mime_type_rejects_non_rfc_6838_names() {
+        let too_long = format!("application/{}", "x".repeat(128));
+        for bad in [
+            "text/markdown\nExec=sh",
+            "text/plain;charset=utf-8",
+            "text/ plain",
+            "text/plain ",
+            "application/x-q\"uote",
+            "text/x<y>",
+            "text/-x",
+            "text/.x",
+            "+text/x",
+            "text/x-é",
+            "text/x\\y",
+            "text/x*",
+            too_long.as_str(),
+        ] {
+            let err = mime_type_err(bad).unwrap_or_else(|| panic!("accepted {bad:?}"));
+            assert!(
+                err.contains(&format!(
+                    "[linux] file_associations[0]: mime_type \"{bad}\" {NOT_RFC_6838}"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    // The .desktop `MimeType=` list is ';'-separated.
+    #[test]
+    fn validate_file_association_mime_type_rejects_a_list() {
+        let err = mime_type_err("text/a;text/b").unwrap();
+        assert!(
+            err.contains("must be of the form \"type/subtype\""),
+            "{err}"
+        );
+    }
+
+    // -- [windows] description --
+
+    fn windows_described(description: &str) -> Config {
+        let mut a = windows_association(&["md"]);
+        a.description = description.into();
+        with_windows(vec![a])
+    }
+
+    #[test]
+    fn validate_windows_blank_description() {
+        let err = err_of(windows_described("   "));
+        assert!(
+            err.contains("[windows] file_associations[0]: description must not be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_windows_description_rejects_control_characters() {
+        for bad in ["Markdown\ndocument", "Markdown\tdocument", "Markdown\u{7f}"] {
+            let err = err_of(windows_described(bad));
+            assert!(
+                err.contains(
+                    "[windows] file_associations[0]: description must not contain control \
+                     characters such as line breaks or tabs; it is shown as a one-line name"
+                ),
+                "{err}"
+            );
+        }
+    }
+
+    // Every output escapes these for its own format.
+    #[test]
+    fn validate_free_text_description_is_accepted() {
+        for good in [
+            "Markdown document",
+            "The \"best\" document",
+            "Costs $5, or ${PRODUCTNAME}",
+            "A `quoted` document",
+            "Notes & Tasks",
+            "C++ <header>",
+            "It's 'quoted'",
+            "Back\\slash; semi",
+            "Dokument für Notizen",
+        ] {
+            windows_described(good)
+                .validate()
+                .unwrap_or_else(|e| panic!("windows rejected {good:?}: {e}"));
+            with_linux(vec![defining_linux(mime_info(good, &[]))])
+                .validate()
+                .unwrap_or_else(|e| panic!("linux rejected {good:?}: {e}"));
+            with_macos(vec![defining_macos(exported_type(
+                "com.example.test.snty",
+                good,
+                &[],
+            ))])
+            .validate()
+            .unwrap_or_else(|e| panic!("macos rejected {good:?}: {e}"));
+        }
+    }
+
+    // -- cross-platform comparison --
+
+    fn modified<T>(mut association: T, set: impl FnOnce(&mut T)) -> T {
+        set(&mut association);
+        association
+    }
+
+    #[test]
+    fn warnings_none_for_a_single_platform() {
+        let m = with_linux(vec![linux_association(&["md"], "text/markdown")]);
+        assert!(m.file_association_warnings().is_empty());
+    }
+
+    #[test]
+    fn warnings_none_when_every_platform_opens_the_same_extensions() {
+        let mut m = with_linux(vec![linux_association(&["md", "csv"], "text/markdown")]);
+        m.macos = Some(macos_section(vec![
+            macos_association(&["csv"]),
+            macos_association(&["md"]),
+        ]));
+        m.windows = Some(windows_section(vec![windows_association(&["md", "csv"])]));
+        assert!(m.file_association_warnings().is_empty());
+    }
+
+    // One line per (extension, platform missing it), in section order.
+    #[test]
+    fn warnings_name_each_platform_missing_an_extension() {
+        let mut m = with_linux(vec![linux_association(&["md"], "text/markdown")]);
+        m.macos = Some(macos_section(vec![macos_association(&["md", "csv"])]));
+        m.windows = Some(windows_section(vec![windows_association(&["csv", "txt"])]));
+        assert_eq!(
+            m.file_association_warnings(),
+            [
+                "extension \"md\" is opened on linux but not on windows; add it there, or set \
+                 unique = true",
+                "extension \"md\" is opened on macos but not on windows; add it there, or set \
+                 unique = true",
+                "extension \"csv\" is opened on macos but not on linux; add it there, or set \
+                 unique = true",
+                "extension \"csv\" is opened on windows but not on linux; add it there, or set \
+                 unique = true",
+                "extension \"txt\" is opened on windows but not on linux; add it there, or set \
+                 unique = true",
+                "extension \"txt\" is opened on windows but not on macos; add it there, or set \
+                 unique = true",
+            ]
+        );
+    }
+
+    // A section that is absent is not a platform the app ships to.
+    #[test]
+    fn warnings_ignore_absent_sections() {
+        let mut m = with_linux(vec![linux_association(&["md"], "text/markdown")]);
+        m.windows = Some(windows_section(vec![windows_association(&["md"])]));
+        assert!(m.file_association_warnings().is_empty());
+
+        // Present without associations still counts.
+        m.macos = Some(macos_section(vec![]));
+        assert_eq!(
+            m.file_association_warnings(),
+            [
+                "extension \"md\" is opened on linux but not on macos; add it there, or set \
+                 unique = true",
+                "extension \"md\" is opened on windows but not on macos; add it there, or set \
+                 unique = true",
+            ]
+        );
+    }
+
+    #[test]
+    fn warnings_exempt_unique_extensions() {
+        let mut m = with_linux(vec![modified(
+            linux_association(&["snty"], "text/x-sanity"),
+            |a| a.unique = true,
+        )]);
+        m.macos = Some(macos_section(vec![modified(
+            macos_association(&["mac"]),
+            |a| a.unique = true,
+        )]));
+        m.windows = Some(windows_section(vec![modified(
+            windows_association(&["win"]),
+            |a| a.unique = true,
+        )]));
+        assert!(m.file_association_warnings().is_empty());
+    }
+
+    // Role `none` declares the app does not open the type, so such an entry
+    // neither warns nor stands in for another platform's extension.
+    #[test]
+    fn warnings_skip_macos_role_none() {
+        let none = |extensions: &[&str]| {
+            modified(macos_association(extensions), |a| {
+                a.role = FileAssociationRole::None
+            })
+        };
+        let mut m = with_linux(vec![linux_association(&["md"], "text/markdown")]);
+        m.macos = Some(macos_section(vec![none(&["md", "csv"])]));
+        assert_eq!(
+            m.file_association_warnings(),
+            [
+                "extension \"md\" is opened on linux but not on macos; add it there, or set \
+                 unique = true"
+            ]
+        );
+
+        // Nor does it clash with a `unique` extension elsewhere.
+        m.linux.as_mut().unwrap().file_associations[0].unique = true;
+        assert!(m.file_association_warnings().is_empty());
+
+        m.linux.as_mut().unwrap().file_associations[0].unique = false;
+        m.macos = Some(macos_section(vec![
+            none(&["md"]),
+            macos_association(&["md2"]),
+        ]));
+        m.linux.as_mut().unwrap().file_associations[0].extensions = vec!["md2".into()];
+        assert!(m.file_association_warnings().is_empty());
+    }
+
+    #[test]
+    fn warnings_flag_a_unique_extension_opened_elsewhere() {
+        let mut m = with_linux(vec![modified(
+            linux_association(&["md"], "text/markdown"),
+            |a| a.unique = true,
+        )]);
+        m.macos = Some(macos_section(vec![macos_association(&["md"])]));
+        m.windows = Some(windows_section(vec![]));
+        assert_eq!(
+            m.file_association_warnings(),
+            [
+                "extension \"md\" is unique to linux but is also opened on macos; remove it \
+                 from macos, or drop unique = true",
+                "extension \"md\" is opened on macos but not on windows; add it there, or set \
+                 unique = true",
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------

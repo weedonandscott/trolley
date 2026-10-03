@@ -399,19 +399,26 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    exe_mod.addImport("common", b.createModule(.{
+    const common_mod = b.createModule(.{
         .root_source_file = b.path("src/common.zig"),
         .target = target,
         .optimize = optimize,
-    }));
+        .link_libc = true,
+        // The Rust config staticlib linked below needs libunwind, which comes
+        // with libc++.
+        .link_libcpp = true,
+    });
+    exe_mod.addImport("common", common_mod);
 
     exe_mod.addIncludePath(ghostty_dep.path("include"));
     exe_mod.linkLibrary(ghostty_lib);
 
-    // Link the config staticlib (manifest parsing).
+    // Link the config staticlib (manifest parsing). Attached to common_mod so
+    // its standalone test binary links it too; the exe gets it via the import.
     exe_mod.addIncludePath(b.path("../config/include"));
+    common_mod.addIncludePath(b.path("../config/include"));
     if (config_lib_path) |lib_path| {
-        exe_mod.addObjectFile(.{ .cwd_relative = lib_path });
+        common_mod.addObjectFile(.{ .cwd_relative = lib_path });
     }
 
     const exe = b.addExecutable(.{
@@ -467,4 +474,8 @@ pub fn build(b: *std.Build) !void {
     });
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    // Tests in imported modules are not run by the exe's test binary.
+    const common_unit_tests = b.addTest(.{ .root_module = common_mod });
+    test_step.dependOn(&b.addRunArtifact(common_unit_tests).step);
 }

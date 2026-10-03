@@ -1,0 +1,47 @@
+# Packaged by `just sanity-test --target <arch>-linux`.
+#
+# Not a scaffold and not derived from one: this file is the complete statement
+# of what that test packages. Read it against tests/sanity/listings/*-linux.list,
+# which is the output it must produce.
+#
+# `identifier` and `slug` fix the dist path the recipe globs
+# (trolley/build/com.example.project/<target>/dist) and every artifact name in
+# the listing snapshot, so neither can change without the snapshot changing.
+
+[app]
+identifier = "com.example.project"
+# Two words on purpose, so the artifact-rename layer is observable:
+# cargo-packager's default AppImage name differs from the composed
+# Project_Sanity_* name, so a broken rename fails the dist listing diff.
+display_name = "Project Sanity"
+slug = "project"
+version = "0.1.0"
+# AppImage requires a square icon. The recipe copies tests/sanity/icon.png
+# next to this file before packaging.
+icons = ["icon.png"]
+
+[linux]
+# Becomes the Categories= line of the generated .desktop entry.
+category = "Utility"
+# Becomes the MimeType= line of the same entry, which the recipe reads back out
+# of the built deb and rpm. `mime_info` also ships
+# usr/share/mime/packages/project.xml defining the type, with `sub_class_of` so
+# every line the XML can carry is present; the recipe reads that file back out
+# of the deb, rpm, pacman tarball and AppImage. `unique`: this fixture tests
+# Linux only, so the other platforms leave the type out.
+file_associations = [
+    { extensions = ["snty"], mime_type = "text/x-sanity", unique = true, mime_info = { comment = "Sanity document", sub_class_of = ["text/plain"] } },
+]
+
+# The recipe copies the trolley CLI here to stand in for a TUI binary.
+[linux.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[macos.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
+
+[windows.binaries]
+x86_64 = "path/to/project"
+aarch64 = "path/to/project"
