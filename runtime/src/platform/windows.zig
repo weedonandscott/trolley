@@ -123,9 +123,12 @@ extern "user32" fn LoadImageW(
     fuLoad: u32,
 ) callconv(.winapi) ?*anyopaque;
 
-extern "kernel32" fn ExitProcess(
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) ?*anyopaque;
+
+extern "kernel32" fn TerminateProcess(
+    hProcess: ?*anyopaque,
     uExitCode: u32,
-) callconv(.winapi) noreturn;
+) callconv(.winapi) BOOL;
 
 extern "winmm" fn timeBeginPeriod(
     uPeriod: u32,
@@ -178,6 +181,11 @@ extern "kernel32" fn LoadLibraryA(
 
 extern "kernel32" fn AttachConsole(
     dwProcessId: u32,
+) callconv(.winapi) BOOL;
+
+extern "kernel32" fn SetConsoleCtrlHandler(
+    HandlerRoutine: ?*const fn (dwCtrlType: u32) callconv(.winapi) BOOL,
+    Add: BOOL,
 ) callconv(.winapi) BOOL;
 
 const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
@@ -320,15 +328,11 @@ fn actionCallback(
             return true;
         },
         ghostty.GHOSTTY_ACTION_QUIT => {
-            if (g_hwnd) |hwnd| {
-                _ = wam.DestroyWindow(hwnd);
-            }
+            wam.PostQuitMessage(0);
             return true;
         },
         ghostty.GHOSTTY_ACTION_CLOSE_WINDOW => {
-            if (g_hwnd) |hwnd| {
-                _ = wam.DestroyWindow(hwnd);
-            }
+            wam.PostQuitMessage(0);
             return true;
         },
         ghostty.GHOSTTY_ACTION_INITIAL_SIZE => {
@@ -476,9 +480,7 @@ fn writeClipboardCallback(
 }
 
 fn closeSurfaceCallback(_: ?*anyopaque, _: bool) callconv(.c) void {
-    if (g_hwnd) |hwnd| {
-        _ = wam.DestroyWindow(hwnd);
-    }
+    wam.PostQuitMessage(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -998,7 +1000,7 @@ fn windowProc(hwnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) callconv(.wi
             // Suppress GDI background erase — OpenGL handles all rendering
             return 1;
         },
-        wam.WM_DESTROY => {
+        wam.WM_CLOSE, wam.WM_DESTROY => {
             wam.PostQuitMessage(0);
             return 0;
         },
@@ -1217,11 +1219,17 @@ fn captureOpenPaths() void {
     g_open_paths = common.collectOpenPaths(alloc, args);
 }
 
+fn consoleCtrlHandler(_: u32) callconv(.winapi) BOOL {
+    _ = TerminateProcess(GetCurrentProcess(), 0);
+    return TRUE;
+}
+
 pub fn main() !void {
     // When launched from a terminal (e.g. `just run`), re-attach to the
     // parent console so stdout/stderr remain visible for debugging.
     // Fails silently when double-clicked or launched from an installer shortcut.
     _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    _ = SetConsoleCtrlHandler(&consoleCtrlHandler, TRUE);
 
     // DPI awareness
     _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1436,7 +1444,7 @@ pub fn main() !void {
     if (precise_timer) {
         _ = timeEndPeriod(1);
     }
-    ExitProcess(0);
+    _ = TerminateProcess(GetCurrentProcess(), 0);
 }
 
 extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *foundation.RECT) callconv(.winapi) BOOL;

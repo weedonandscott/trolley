@@ -835,7 +835,6 @@ pub fn main() !void {
         return error.GhosttyAppFailed;
     }
     ghostty.ghostty_config_free(config);
-    // NOTE: no defer for ghostty_app_free — see std.process.exit(0) below.
     g_app = app;
 
     // -- Create surface with Linux platform (OpenGL) --
@@ -870,7 +869,6 @@ pub fn main() !void {
     if (surface == null) {
         return error.GhosttySurfaceFailed;
     }
-    // NOTE: no defer for ghostty_surface_free — see std.process.exit(0) below.
     g_surface = surface;
 
     // Set initial size from framebuffer
@@ -906,9 +904,5 @@ pub fn main() !void {
         flushDeferred();
     }
 
-    // Exit immediately. Ghostty's Surface.deinit assumes the GL context
-    // can be re-acquired (catch unreachable), but on Wayland/EGL the
-    // context becomes invalid once the window is closing. The OS reclaims
-    // all resources on process exit.
-    std.process.exit(0);
+    std.c._exit(0);
 }
